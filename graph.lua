@@ -1,0 +1,434 @@
+local Graph = {}
+Graph.__index = Graph
+
+-- Backstop against engine bugs; graphs are cycle-checked at connect-time so this
+-- should never be hit in practice (see docs/adr/0004-execution-semantics.md).
+local MAX_DEPTH = 256
+
+local function hasExecPins(nodeType)
+    for _, pinName in ipairs(nodeType.pinOrder) do
+        if nodeType.pins[pinName].kind == "exec" then
+            return true
+        end
+    end
+    return false
+end
+
+local function copyDefault(value)
+    if type(value) == "table" then
+        local copy = {}
+        for k, v in pairs(value) do
+            copy[k] = v
+        end
+        return copy
+    end
+    return value
+end
+
+function Graph.new(registry)
+    assert(registry ~= nil, "Graph.new requires a Registry")
+    return setmetatable({
+        registry = registry,
+        nodes = {},
+        connections = {},
+        nextNodeId = 1,
+        nextConnectionId = 1,
+        lastTrace = {},
+        _activeTrace = nil,
+    }, Graph)
+end
+
+--- Structure: nodes, connections ---------------------------------------------------
+
+function Graph:AddNode(typeKey, controls)
+    local nodeType = self.registry:GetNodeType(typeKey)
+    assert(nodeType ~= nil, "unknown node type '" .. tostring(typeKey) .. "'")
+
+    local id = self.nextNodeId
+    self.nextNodeId = id + 1
+
+    local nodeControls = {}
+    for _, pinName in ipairs(nodeType.pinOrder) do
+        local pin = nodeType.pins[pinName]
+        if pin.kind == "data" and pin.direction == "in" then
+            if controls ~= nil and controls[pinName] ~= nil then
+                nodeControls[pinName] = controls[pinName]
+            else
+                nodeControls[pinName] = copyDefault(pin.default)
+            end
+        end
+    end
+
+    self.nodes[id] = {
+        id = id,
+        typeKey = typeKey,
+        controls = nodeControls,
+        values = {},
+        -- Per-node persistent scratch, exposed to run as ctx.state. Survives across
+        -- Fires like `values`, and like `values` is runtime-only (never serialized).
+        -- See docs/adr/0010-stateful-node-support.md.
+        state = {},
+    }
+    return id
+end
+
+function Graph:RemoveNode(id)
+    if self.nodes[id] == nil then
+        return
+    end
+    self.nodes[id] = nil
+    for connId, conn in pairs(self.connections) do
+        if conn.fromNode == id or conn.toNode == id then
+            self.connections[connId] = nil
+        end
+    end
+end
+
+function Graph:_getPin(nodeId, pinName)
+    local node = self.nodes[nodeId]
+    if node == nil then
+        return nil
+    end
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    if nodeType == nil then
+        return nil
+    end
+    return nodeType.pins[pinName]
+end
+
+--- Cycle detection (docs/adr/0004, rule 4) ------------------------------------------
+
+-- Builds the propagation graph: inter-node edges (existing wires) plus intra-node
+-- edges (non-Terminator exec input -> every exec output of the same node; and,
+-- conservatively, every data input -> every data output of the same node, since a
+-- Pure Node's run may read any of its inputs to produce any of its outputs).
+function Graph:_buildPropagationEdges()
+    local edges = {}
+
+    local function addEdge(fromKey, toKey)
+        local list = edges[fromKey]
+        if list == nil then
+            list = {}
+            edges[fromKey] = list
+        end
+        list[#list + 1] = toKey
+    end
+
+    for _, conn in pairs(self.connections) do
+        addEdge(conn.fromNode .. ":" .. conn.fromPin, conn.toNode .. ":" .. conn.toPin)
+    end
+
+    for nodeId, node in pairs(self.nodes) do
+        local nodeType = self.registry:GetNodeType(node.typeKey)
+        if nodeType ~= nil then
+            local execOutputs, execInputs, dataOutputs, dataInputs = {}, {}, {}, {}
+            for _, pinName in ipairs(nodeType.pinOrder) do
+                local pin = nodeType.pins[pinName]
+                if pin.kind == "exec" and pin.direction == "out" then
+                    execOutputs[#execOutputs + 1] = pinName
+                elseif pin.kind == "exec" and pin.direction == "in" and not pin.terminates then
+                    execInputs[#execInputs + 1] = pinName
+                elseif pin.kind == "data" and pin.direction == "out" then
+                    dataOutputs[#dataOutputs + 1] = pinName
+                elseif pin.kind == "data" and pin.direction == "in" then
+                    dataInputs[#dataInputs + 1] = pinName
+                end
+            end
+            for _, inputName in ipairs(execInputs) do
+                for _, outputName in ipairs(execOutputs) do
+                    addEdge(nodeId .. ":" .. inputName, nodeId .. ":" .. outputName)
+                end
+            end
+            for _, inputName in ipairs(dataInputs) do
+                for _, outputName in ipairs(dataOutputs) do
+                    addEdge(nodeId .. ":" .. inputName, nodeId .. ":" .. outputName)
+                end
+            end
+        end
+    end
+
+    return edges
+end
+
+function Graph:_canReach(edges, startKey, targetKey)
+    if startKey == targetKey then
+        return true
+    end
+    local visited = { [startKey] = true }
+    local stack = { startKey }
+    while #stack > 0 do
+        local current = table.remove(stack)
+        for _, nextKey in ipairs(edges[current] or {}) do
+            if nextKey == targetKey then
+                return true
+            end
+            if not visited[nextKey] then
+                visited[nextKey] = true
+                stack[#stack + 1] = nextKey
+            end
+        end
+    end
+    return false
+end
+
+--- Connections -----------------------------------------------------------------------
+
+function Graph:Connect(fromNode, fromPin, toNode, toPin)
+    local fromPinDef = self:_getPin(fromNode, fromPin)
+    local toPinDef = self:_getPin(toNode, toPin)
+    assert(fromPinDef ~= nil, "unknown pin '" .. tostring(fromPin) .. "' on node " .. tostring(fromNode))
+    assert(toPinDef ~= nil, "unknown pin '" .. tostring(toPin) .. "' on node " .. tostring(toNode))
+    assert(fromPinDef.direction == "out", "'" .. fromPin .. "' is not an output pin")
+    assert(toPinDef.direction == "in", "'" .. toPin .. "' is not an input pin")
+    assert(fromPinDef.kind == toPinDef.kind, "cannot connect an exec pin to a data pin")
+
+    if fromPinDef.kind == "data" then
+        local fromTag, toTag = fromPinDef.dataType, toPinDef.dataType
+        assert(fromTag == toTag or fromTag == "any" or toTag == "any",
+            "data type mismatch: '" .. tostring(fromTag) .. "' -> '" .. tostring(toTag) .. "'")
+        for _, conn in pairs(self.connections) do
+            assert(not (conn.toNode == toNode and conn.toPin == toPin),
+                "data input '" .. toPin .. "' on node " .. tostring(toNode) .. " already has a connection")
+        end
+    end
+
+    local fromKey, toKey = fromNode .. ":" .. fromPin, toNode .. ":" .. toPin
+    local edges = self:_buildPropagationEdges()
+    assert(not self:_canReach(edges, toKey, fromKey),
+        "connecting '" .. fromPin .. "' -> '" .. toPin .. "' would create a cycle")
+
+    local id = self.nextConnectionId
+    self.nextConnectionId = id + 1
+    self.connections[id] = {
+        id = id,
+        fromNode = fromNode,
+        fromPin = fromPin,
+        toNode = toNode,
+        toPin = toPin,
+    }
+    return id
+end
+
+function Graph:Disconnect(connectionId)
+    self.connections[connectionId] = nil
+end
+
+function Graph:_findSourceConnection(nodeId, pinName)
+    for _, conn in pairs(self.connections) do
+        if conn.toNode == nodeId and conn.toPin == pinName then
+            return conn
+        end
+    end
+    return nil
+end
+
+function Graph:_findTargetConnections(nodeId, pinName)
+    local out = {}
+    for _, conn in pairs(self.connections) do
+        if conn.fromNode == nodeId and conn.fromPin == pinName then
+            out[#out + 1] = conn
+        end
+    end
+    return out
+end
+
+--- Controls ----------------------------------------------------------------------------
+
+function Graph:SetControl(nodeId, pinName, value)
+    local node = self.nodes[nodeId]
+    assert(node ~= nil, "unknown node " .. tostring(nodeId))
+    local pin = self:_getPin(nodeId, pinName)
+    assert(pin ~= nil and pin.kind == "data" and pin.direction == "in",
+        "'" .. tostring(pinName) .. "' is not a data input pin")
+    node.controls[pinName] = value
+end
+
+function Graph:GetControl(nodeId, pinName)
+    local node = self.nodes[nodeId]
+    if node == nil then
+        return nil
+    end
+    return node.controls[pinName]
+end
+
+function Graph:GetLastValue(nodeId, pinName)
+    local node = self.nodes[nodeId]
+    if node == nil then
+        return nil
+    end
+    return node.values[pinName]
+end
+
+--- Read-only inspection (docs/adr/0006) -------------------------------------------------
+
+function Graph:GetNodes()
+    local out = {}
+    for _, node in pairs(self.nodes) do
+        out[#out + 1] = { id = node.id, typeKey = node.typeKey }
+    end
+    return out
+end
+
+function Graph:GetNodesByCategory(category)
+    local out = {}
+    for _, node in pairs(self.nodes) do
+        local nodeType = self.registry:GetNodeType(node.typeKey)
+        if nodeType ~= nil and nodeType.category == category then
+            out[#out + 1] = { id = node.id, typeKey = node.typeKey }
+        end
+    end
+    return out
+end
+
+function Graph:GetConnections()
+    local out = {}
+    for _, conn in pairs(self.connections) do
+        out[#out + 1] = {
+            id = conn.id,
+            fromNode = conn.fromNode,
+            fromPin = conn.fromPin,
+            toNode = conn.toNode,
+            toPin = conn.toPin,
+        }
+    end
+    return out
+end
+
+function Graph:GetPins(nodeId)
+    local node = self.nodes[nodeId]
+    if node == nil then
+        return nil
+    end
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    if nodeType == nil then
+        return nil
+    end
+    local out = {}
+    for _, pinName in ipairs(nodeType.pinOrder) do
+        local pin = nodeType.pins[pinName]
+        out[#out + 1] = {
+            name = pin.name,
+            kind = pin.kind,
+            direction = pin.direction,
+            dataType = pin.dataType,
+            terminates = pin.terminates,
+            label = pin.label,
+        }
+    end
+    return out
+end
+
+function Graph:GetLastTrace()
+    return self.lastTrace
+end
+
+--- Execution (docs/adr/0003, docs/adr/0004) ---------------------------------------------
+
+function Graph:_recordTrace(kind, nodeId, pinName, value)
+    local trace = self._activeTrace
+    if trace ~= nil then
+        trace[#trace + 1] = { type = kind, node = nodeId, pin = pinName, value = value }
+    end
+end
+
+-- `payload` is the value handed to Graph:Fire, surfaced only on the entry node's ctx
+-- (docs/adr/0009). `execPin` is the name of the exec input this run entered through,
+-- or nil for an external entry / a pulled Pure Node (docs/adr/0010).
+function Graph:_makeCtx(node, nodeType, depth, payload, execPin)
+    local graph = self
+    return {
+        -- Event data injected from outside at the Trigger; nil everywhere downstream.
+        payload = payload,
+        -- Which exec input fired this run; nil for Triggers and pulled Pure Nodes.
+        exec = execPin,
+        -- Per-node persistent state bag (survives across Fires; not serialized).
+        state = node.state,
+        In = function(_, pinName)
+            return graph:_pull(node, pinName, depth)
+        end,
+        Out = function(_, pinName, value)
+            local pin = nodeType.pins[pinName]
+            assert(pin ~= nil and pin.kind == "data" and pin.direction == "out",
+                "'" .. tostring(pinName) .. "' is not a data output pin on '" .. nodeType.key .. "'")
+            node.values[pinName] = value
+        end,
+        Fire = function(_, pinName)
+            graph:_fireOutput(node, pinName, depth)
+        end,
+    }
+end
+
+function Graph:_pull(node, pinName, depth)
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    local pin = nodeType.pins[pinName]
+    assert(pin ~= nil and pin.kind == "data" and pin.direction == "in",
+        "'" .. tostring(pinName) .. "' is not a data input pin on '" .. nodeType.key .. "'")
+
+    local sourceConn = self:_findSourceConnection(node.id, pinName)
+    if sourceConn == nil then
+        return node.controls[pinName]
+    end
+
+    local sourceNode = self.nodes[sourceConn.fromNode]
+    assert(sourceNode ~= nil, "dangling connection to missing node " .. tostring(sourceConn.fromNode))
+    local sourceType = self.registry:GetNodeType(sourceNode.typeKey)
+
+    if hasExecPins(sourceType) then
+        -- Execution node: value only meaningful once it has run this Fire (rule 3).
+        local value = sourceNode.values[sourceConn.fromPin]
+        self:_recordTrace("pull", sourceNode.id, sourceConn.fromPin, value)
+        return value
+    end
+
+    -- Pure Node: re-evaluate fresh on every pull (rule 3), no memoization.
+    assert(depth < MAX_DEPTH, "recursion depth exceeded while pulling '" .. pinName .. "'")
+    -- A pulled Pure Node has no payload and no entering exec pin.
+    self:_executeNode(sourceNode, sourceType, depth + 1, nil, nil)
+    local value = sourceNode.values[sourceConn.fromPin]
+    self:_recordTrace("pull", sourceNode.id, sourceConn.fromPin, value)
+    return value
+end
+
+function Graph:_executeNode(node, nodeType, depth, payload, execPin)
+    self:_recordTrace("execute", node.id, nil, nil)
+    local ctx = self:_makeCtx(node, nodeType, depth, payload, execPin)
+    nodeType.run(ctx)
+end
+
+function Graph:_fireOutput(node, pinName, depth)
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    local pin = nodeType.pins[pinName]
+    assert(pin ~= nil and pin.kind == "exec" and pin.direction == "out",
+        "'" .. tostring(pinName) .. "' is not an exec output pin on '" .. nodeType.key .. "'")
+
+    self:_recordTrace("fire", node.id, pinName, nil)
+    assert(depth < MAX_DEPTH, "recursion depth exceeded while firing '" .. pinName .. "'")
+
+    for _, conn in ipairs(self:_findTargetConnections(node.id, pinName)) do
+        local targetNode = self.nodes[conn.toNode]
+        if targetNode ~= nil then
+            local targetType = self.registry:GetNodeType(targetNode.typeKey)
+            -- Downstream nodes see no payload; ctx.exec is the input they arrived on.
+            self:_executeNode(targetNode, targetType, depth + 1, nil, conn.toPin)
+        end
+    end
+end
+
+-- Entry point: begins a Fire at a Trigger (or any node) by running it directly.
+-- The node's own run(ctx) is expected to call ctx:Fire(...) to propagate onward.
+-- `payload` is an optional, engine-opaque value (typically an event table) surfaced
+-- as ctx.payload on this entry node only; downstream nodes never see it and read
+-- event data through Data pins instead (docs/adr/0009).
+function Graph:Fire(nodeId, payload)
+    local node = self.nodes[nodeId]
+    assert(node ~= nil, "unknown node " .. tostring(nodeId))
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    assert(nodeType ~= nil, "unknown node type '" .. tostring(node.typeKey) .. "'")
+
+    self._activeTrace = {}
+    self:_executeNode(node, nodeType, 0, payload, nil)
+    self.lastTrace = self._activeTrace
+    self._activeTrace = nil
+end
+
+return Graph
