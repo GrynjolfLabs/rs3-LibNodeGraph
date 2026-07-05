@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set plugin name
+        id: vars
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          echo "plugin_name=${REPO_NAME#rs3-}" >> "$GITHUB_OUTPUT"
+
+      - name: Package plugin
+        run: |
+          PLUGIN_NAME="${{ steps.vars.outputs.plugin_name }}"
+          STAGE="staging/$PLUGIN_NAME"
+          mkdir -p "$STAGE"
+          [ -f plugin.json ] && cp plugin.json "$STAGE/"
+          find . -path ./staging -prune -o -path ./tests -prune -o -path ./docs -prune -o -path ./.git -prune -o -name '*.lua' -print | while read -r f; do
+            mkdir -p "$STAGE/$(dirname "$f")"
+            cp "$f" "$STAGE/$f"
+          done
+          (cd staging && zip -r "../$PLUGIN_NAME.zip" "$PLUGIN_NAME")
+
+      - name: Upload plugin zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-zip
+          path: ${{ steps.vars.outputs.plugin_name }}.zip
+
+      - name: Create changelog
+        run: |
+          if PREV_TAG=$(git describe --tags --abbrev=0 @^ 2>/dev/null); then
+            git log "$PREV_TAG"..@ --pretty=%B > CHANGELOG.md
+          else
+            git log --pretty=%B > CHANGELOG.md
+          fi
+
+      - name: Upload changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-changelog
+          path: CHANGELOG.md
+
+  create-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - name: Set plugin name
+        id: vars
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY##*/}"
+          echo "plugin_name=${REPO_NAME#rs3-}" >> "$GITHUB_OUTPUT"
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Create release
+        uses: ncipollo/release-action@v1.16.0
+        with:
+          artifactErrorsFailBuild: true
+          artifacts: "release-artifacts/plugin-zip/${{ steps.vars.outputs.plugin_name }}.zip"
+          bodyFile: "release-artifacts/plugin-changelog/CHANGELOG.md"
+          generateReleaseNotes: true
+          name: Release ${{ github.ref_name }}
+          tag: ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-alpha') || contains(github.ref_name, '-beta') }}
