@@ -1,13 +1,42 @@
-local Registry = {}
-Registry.__index = Registry
+-- One Pin declaration in a Node Type definition.
+---@class LibNodeGraph.PinDef
+---@field name string
+---@field kind "exec"|"data"
+---@field direction "in"|"out"
+---@field dataType string|nil     # Data Pin Type Tag; nil for exec pins
+---@field default any             # data-input Control default
+---@field terminates boolean|nil  # exec-input Terminator flag (ADR-0004)
+---@field label string|nil
 
+-- The table passed to Registry:RegisterNodeType. Typing `run` here is what propagates the
+-- RunContext contract to every `run = function(ctx)` a consumer writes: because `definition`
+-- is typed, LuaLS infers `ctx`'s type from this field, so `ctx.<typo>` is a static error.
+---@class LibNodeGraph.NodeTypeDef
+---@field category string
+---@field displayName string|nil
+---@field pins LibNodeGraph.PinDef[]
+---@field run fun(ctx: LibNodeGraph.RunContext)
+---@field preload? fun(node: table)   # optional resource-preload hook (see Watchdog runtime)
+
+-- `Registry.__index = Registry` is set inside Registry.new, NOT at the top level: a
+-- self-referential module table triggers an infinite traversal in the client at require time
+-- (freeze+crash).
+---@class LibNodeGraph.Registry
+---@field nodeTypes table<string, table>  # registered Node Types, keyed by their string key
+---@field dataTypes table<string, table>  # optional Data Pin Type Tag metadata, keyed by tag
+local Registry = {}
+
+---@return LibNodeGraph.Registry
 function Registry.new()
+    Registry.__index = Registry
     return setmetatable({
         nodeTypes = {},
         dataTypes = {},
     }, Registry)
 end
 
+---@param key string
+---@param definition LibNodeGraph.NodeTypeDef
 function Registry:RegisterNodeType(key, definition)
     assert(type(key) == "string" and key ~= "", "node type key must be a non-empty string")
     assert(type(definition) == "table", "node type definition must be a table")

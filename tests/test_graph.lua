@@ -484,6 +484,66 @@ function TestGraph:testCtxExecIsNilForExternallyFiredEntryNode()
     luaunit.assertIsNil(self.entryLog[1].exec)
 end
 
+--- FireInput: entering a node through a chosen exec input ------------------------------
+
+function TestGraph:testFireInputEntersThroughTheNamedExecPin()
+    local twoInId = self.graph:AddNode("fixture.twoin")
+
+    self.graph:FireInput(twoInId, "b")
+
+    luaunit.assertEquals(#self.entryLog, 1)
+    luaunit.assertEquals(self.entryLog[1].exec, "b")
+end
+
+function TestGraph:testFireInputPropagatesDownstream()
+    local twoInId = self.graph:AddNode("fixture.twoin")
+    local probeId = self.graph:AddNode("fixture.probe")
+    self.graph:Connect(twoInId, "out", probeId, "in")
+
+    -- "a" makes fixture.twoin fire its "out", so the probe runs too; "b" would not.
+    self.graph:FireInput(twoInId, "a")
+
+    luaunit.assertEquals(#self.entryLog, 1)
+    luaunit.assertEquals(self.entryLog[1].exec, "a")
+    luaunit.assertEquals(#self.probeLog, 1)
+end
+
+function TestGraph:testFireInputGivesTheEntryNodeNilPayload()
+    local twoInId = self.graph:AddNode("fixture.twoin")
+    local probeId = self.graph:AddNode("fixture.probe")
+    self.graph:Connect(twoInId, "out", probeId, "in")
+
+    self.graph:FireInput(twoInId, "a")
+
+    luaunit.assertIsNil(self.probeLog[1].payload)
+end
+
+function TestGraph:testFireInputRejectsANonExecInputPin()
+    local twoInId = self.graph:AddNode("fixture.twoin")
+    -- "out" is an exec OUTPUT, not an input.
+    luaunit.assertErrorMsgContains("not an exec input pin", function()
+        self.graph:FireInput(twoInId, "out")
+    end)
+end
+
+--- Node identity, ctx.nodeId ----------------------------------------------------------
+
+function TestGraph:testCtxNodeIdIsTheRunningNodesId()
+    local nodeIdLog = {}
+    self.registry:RegisterNodeType("fixture.identity", {
+        category = "action",
+        pins = { { name = "in", kind = "exec", direction = "in", terminates = true } },
+        run = function(ctx) table.insert(nodeIdLog, ctx.nodeId) end,
+    })
+    local a = self.graph:AddNode("fixture.identity")
+    local b = self.graph:AddNode("fixture.identity")
+
+    self.graph:FireInput(a, "in")
+    self.graph:FireInput(b, "in")
+
+    luaunit.assertEquals(nodeIdLog, { a, b })
+end
+
 --- Node state, ctx.state (docs/adr/0010) ----------------------------------------------
 
 function TestGraph:testCtxStatePersistsAcrossFires()
@@ -556,6 +616,7 @@ function TestGraph:testGetPinsReturnsDeclaredPinsInOrder()
     luaunit.assertEquals(pins[2].name, "b")
     luaunit.assertEquals(pins[3].name, "sum")
     luaunit.assertEquals(pins[3].dataType, "number")
+    luaunit.assertEquals(pins[1].default, 0)  -- pin defaults are exposed for UI Control boxes
 end
 
 function TestGraph:testGetPinsUnknownNodeReturnsNil()

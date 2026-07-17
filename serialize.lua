@@ -59,7 +59,7 @@ function Serialize.Deserialize(data, registry)
     assert(type(data) == "table", "Deserialize requires a table")
 
     local graph = Graph.new(registry)
-    local idMap = {}
+    local maxId = 0
 
     for _, nodeData in ipairs(data.nodes or {}) do
         local nodeType = registry:GetNodeType(nodeData.type)
@@ -76,14 +76,22 @@ function Serialize.Deserialize(data, registry)
             end
         end
 
-        idMap[nodeData.id] = graph:AddNode(nodeData.type, controls)
+        -- Preserve the original node id (a lossless round-trip), not just the graph's
+        -- shape, so external id-keyed data a consumer holds alongside the graph — e.g.
+        -- Watchdog's Layout (nodeId -> position) — stays valid across a save/load.
+        -- AddNode draws the new id from graph.nextNodeId, so pin it to the stored id.
+        graph.nextNodeId = nodeData.id
+        local newId = graph:AddNode(nodeData.type, controls)
+        assert(newId == nodeData.id, "failed to preserve node id during deserialize")
+        if nodeData.id > maxId then maxId = nodeData.id end
     end
+    -- Keep allocating ids above every restored one so a later AddNode can't collide.
+    graph.nextNodeId = maxId + 1
 
     for _, connData in ipairs(data.connections or {}) do
-        local fromNode = idMap[connData.fromNode]
-        local toNode = idMap[connData.toNode]
-        assert(fromNode ~= nil and toNode ~= nil, "connection references unknown node id during deserialize")
-        graph:Connect(fromNode, connData.fromPin, toNode, connData.toPin)
+        assert(graph.nodes[connData.fromNode] ~= nil and graph.nodes[connData.toNode] ~= nil,
+            "connection references unknown node id during deserialize")
+        graph:Connect(connData.fromNode, connData.fromPin, connData.toNode, connData.toPin)
     end
 
     return graph

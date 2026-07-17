@@ -98,6 +98,30 @@ function TestSerialize:testDeserializeRebuildsEquivalentGraph()
     luaunit.assertEquals(rebuilt:GetControl(newAddId, "b"), 3)
 end
 
+function TestSerialize:testDeserializePreservesNodeIds()
+    -- Build a graph with a gap in the id sequence (a removed node) so a naive
+    -- "renumber from 1" deserialize would visibly differ from the original ids.
+    local triggerId = self.graph:AddNode("fixture.trigger")
+    local throwaway = self.graph:AddNode("fixture.add")
+    local actionId = self.graph:AddNode("fixture.action")
+    self.graph:RemoveNode(throwaway)
+    self.graph:Connect(triggerId, "out", actionId, "in")
+
+    local data = Serialize.Serialize(self.graph)
+    local rebuilt = Serialize.Deserialize(data, buildRegistry())
+
+    -- Original ids survive the round-trip, so external id-keyed data stays valid.
+    luaunit.assertNotIsNil(rebuilt.nodes[triggerId])
+    luaunit.assertNotIsNil(rebuilt.nodes[actionId])
+    luaunit.assertIsNil(rebuilt.nodes[throwaway])
+    luaunit.assertEquals(rebuilt.nodes[triggerId].typeKey, "fixture.trigger")
+    luaunit.assertEquals(rebuilt.nodes[actionId].typeKey, "fixture.action")
+
+    -- A freshly added node lands above every restored id (no collision).
+    local freshId = rebuilt:AddNode("fixture.add")
+    luaunit.assertEquals(freshId, actionId + 1)
+end
+
 function TestSerialize:testExportImportJsonRoundTripPreservesBehavior()
     local log = {}
     local registry = buildRegistry()

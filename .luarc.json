@@ -1,0 +1,17 @@
+{
+	"$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+	"workspace.checkThirdParty": false,
+	"workspace.ignoreDir": [".claude", ".sandcastle", "staging", "tests/luaunit.lua"],
+	"diagnostics.disable": [
+		"duplicate-set-field",
+		"need-check-nil",
+		"inject-field",
+		"cast-local-type",
+		"missing-fields",
+		"param-type-mismatch",
+		"assign-type-mismatch",
+		"redundant-parameter",
+		"redundant-return-value",
+		"missing-return-value"
+	]
+}

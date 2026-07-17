@@ -1,5 +1,6 @@
+-- `Graph.__index = Graph` is set inside Graph.new, NOT at the top level: a self-referential
+-- module table triggers an infinite traversal in the client at require time (freeze+crash).
 local Graph = {}
-Graph.__index = Graph
 
 -- Backstop against engine bugs; graphs are cycle-checked at connect-time so this
 -- should never be hit in practice (see docs/adr/0004-execution-semantics.md).
@@ -26,6 +27,7 @@ local function copyDefault(value)
 end
 
 function Graph.new(registry)
+    Graph.__index = Graph
     assert(registry ~= nil, "Graph.new requires a Registry")
     return setmetatable({
         registry = registry,
@@ -313,6 +315,7 @@ function Graph:GetPins(nodeId)
             dataType = pin.dataType,
             terminates = pin.terminates,
             label = pin.label,
+            default = pin.default,
         }
     end
     return out
@@ -331,12 +334,48 @@ function Graph:_recordTrace(kind, nodeId, pinName, value)
     end
 end
 
+-- The complete contract for the single argument every Node Type's `run` receives. This class
+-- is the ONE authoritative shape of the run context; the field guard below and `_makeCtx`'s
+-- construction are kept in lockstep with it, and every `run = function(ctx)` in a consumer is
+-- typed against it (see registry.lua's NodeTypeDef.run) so a stray field read (e.g. `ctx.pin`
+-- instead of `ctx.exec`) is a static undefined-field error rather than a silent nil.
+---@class LibNodeGraph.RunContext
+---@field nodeId integer                 # this node's own stable id
+---@field payload any                    # event data on a Trigger entry; nil downstream (ADR-0009)
+---@field exec string|nil                # which exec input fired; nil for Triggers / pulled Pure Nodes (ADR-0010)
+---@field state table                    # per-node scratch, persists across Fires; not serialized
+---@field In fun(self: LibNodeGraph.RunContext, pin: string): any  # pull a data input
+---@field Out fun(self: LibNodeGraph.RunContext, pin: string, value: any)  # set a data output
+---@field Fire fun(self: LibNodeGraph.RunContext, pin: string)  # continue through an exec output
+
+-- Dynamic backstop to the static RunContext class: reading any field NOT on the contract
+-- raises, so a node that references a field the engine never sets — a typo, or a plausible-but-
+-- nonexistent field an author assumed — fails loudly the first time it's touched, in tests and
+-- in dev, instead of silently evaluating to nil. Declared-but-absent fields stay legal: `exec`
+-- is nil on a Trigger entry and `payload` is nil downstream, so those keys are simply missing
+-- from the table — the allowlist lets a miss on them return nil, and only unknown names error.
+local CTX_FIELDS = {
+    nodeId = true, payload = true, exec = true, state = true,
+    In = true, Out = true, Fire = true,
+}
+local CTX_GUARD = {
+    __index = function(_, key)
+        if CTX_FIELDS[key] then return nil end
+        error("run(ctx): unknown ctx field '" .. tostring(key)
+            .. "' — see the LibNodeGraph.RunContext contract in graph.lua", 2)
+    end,
+}
+
 -- `payload` is the value handed to Graph:Fire, surfaced only on the entry node's ctx
 -- (docs/adr/0009). `execPin` is the name of the exec input this run entered through,
 -- or nil for an external entry / a pulled Pure Node (docs/adr/0010).
+---@return LibNodeGraph.RunContext
 function Graph:_makeCtx(node, nodeType, depth, payload, execPin)
     local graph = self
-    return {
+    return setmetatable({
+        -- This node's own stable id, so a run can key external state (effect stacks, info
+        -- boxes) to the specific node it belongs to rather than the node type.
+        nodeId = node.id,
         -- Event data injected from outside at the Trigger; nil everywhere downstream.
         payload = payload,
         -- Which exec input fired this run; nil for Triggers and pulled Pure Nodes.
@@ -355,7 +394,7 @@ function Graph:_makeCtx(node, nodeType, depth, payload, execPin)
         Fire = function(_, pinName)
             graph:_fireOutput(node, pinName, depth)
         end,
-    }
+    }, CTX_GUARD)
 end
 
 function Graph:_pull(node, pinName, depth)
@@ -427,6 +466,27 @@ function Graph:Fire(nodeId, payload)
 
     self._activeTrace = {}
     self:_executeNode(node, nodeType, 0, payload, nil)
+    self.lastTrace = self._activeTrace
+    self._activeTrace = nil
+end
+
+-- Entry point that enters a node through one of its exec INPUT pins, as if an upstream node
+-- had fired a wire into `pinName`: the node's run(ctx) sees ctx.exec == pinName (and, like any
+-- downstream entry, ctx.payload == nil — docs/adr/0009). Unlike Fire (which enters with no
+-- exec pin, the Trigger case), this lets a caller exercise a single node through a chosen exec
+-- input — the editor's per-pin "test" button. Propagation is identical to a real fire: any
+-- ctx:Fire the node performs runs its downstream targets in turn.
+function Graph:FireInput(nodeId, pinName)
+    local node = self.nodes[nodeId]
+    assert(node ~= nil, "unknown node " .. tostring(nodeId))
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    assert(nodeType ~= nil, "unknown node type '" .. tostring(node.typeKey) .. "'")
+    local pin = nodeType.pins[pinName]
+    assert(pin ~= nil and pin.kind == "exec" and pin.direction == "in",
+        "'" .. tostring(pinName) .. "' is not an exec input pin on '" .. nodeType.key .. "'")
+
+    self._activeTrace = {}
+    self:_executeNode(node, nodeType, 0, nil, pinName)
     self.lastTrace = self._activeTrace
     self._activeTrace = nil
 end

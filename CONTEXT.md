@@ -120,3 +120,36 @@ pulls (with the values carried) that occurred, in order. Recorded only while tra
 enabled and exposed for the consumer to replay as a live visualization. It carries no timing
 or presentation data.
 _Avoid_: Log, history, timeline, journal
+
+## The run(ctx) contract and how it's enforced
+
+Every Node Type's `run` receives one argument, `ctx`, whose complete shape is the
+`LibNodeGraph.RunContext` class defined in [graph.lua](graph.lua) (`nodeId`, `payload`,
+`exec`, `state`, and the methods `In`/`Out`/`Fire`). That class is the single source of truth;
+`_makeCtx` is kept in lockstep with it. This contract has been silently mis-assumed before — a
+node read `ctx.pin`/`ctx.id` (fields the engine never sets) instead of `ctx.exec`/`ctx.nodeId`,
+and nothing caught it — so three independent guards now exist, and a node author should rely on
+all three rather than trusting a remembered field name:
+
+1. **Test node behavior against a real Graph, never a fabricated ctx.** A test that hand-builds
+   a `ctx` table can only ever agree with whatever the node's code already assumes — it is
+   structurally blind to a divergence from the real engine, which is exactly how `ctx.pin`
+   passed its unit tests. Build a real `Registry` + `Graph`, `AddNode`, set Controls, and drive
+   the node with `Graph:FireInput(id, execPin)` (enter through a chosen exec input) or
+   `Graph:Fire(id)` (enter with no exec pin), then assert on the observable effect. See
+   Watchdog's `tests/test_screen_marker.lua` / `tests/test_infobox_node.lua` for the pattern.
+2. **The RunContext field guard (runtime).** The table `_makeCtx` returns errors on *read* of
+   any field not on the contract, so a typo'd or assumed-nonexistent field fails loudly the
+   first time it's touched (in tests and dev) rather than evaluating to a silent `nil`.
+   Declared-but-absent fields (`exec` on a Trigger, `payload` downstream) still read as `nil`.
+3. **Static typing (LuaLS).** `RegisterNodeType`'s `definition` param is typed
+   `LibNodeGraph.NodeTypeDef`, whose `run` field carries the `RunContext` type — so annotating a
+   consumer's registration function `---@param registry LibNodeGraph.Registry` propagates the
+   type to `ctx` at the `run = function(ctx)` site, and `ctx.<typo>` becomes an `undefined-field`
+   diagnostic. Verify a tree with:
+
+   ```bash
+   lua-language-server --check <plugin-dir> --checklevel=Warning
+   ```
+
+   (exit code is non-zero when problems are found, suitable for CI).
