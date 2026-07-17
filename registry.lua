@@ -71,6 +71,7 @@ function Registry:RegisterNodeType(key, definition)
         pins = pins,
         pinOrder = pinOrder,
         run = definition.run,
+        preload = definition.preload,  -- optional resource-preload hook (see Watchdog runtime)
     }
     return self.nodeTypes[key]
 end
