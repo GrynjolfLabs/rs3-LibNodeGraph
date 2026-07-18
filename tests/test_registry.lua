@@ -109,6 +109,43 @@ function TestRegistry:testGetNodeTypesByCategoryFilters()
     luaunit.assertEquals(#none, 0)
 end
 
+function TestRegistry:testUnknownTypeIsRegisteredAndHidden()
+    local unknown = self.registry:GetNodeType(Registry.UNKNOWN_TYPE)
+    luaunit.assertNotIsNil(unknown)
+    luaunit.assertEquals(unknown.hidden, true)
+    luaunit.assertEquals(unknown.pinOrder, {})
+    -- No-op run: callable, sets nothing.
+    luaunit.assertEquals(type(unknown.run), "function")
+end
+
+function TestRegistry:testUnknownTypeKeyIsReservedFromRegistration()
+    luaunit.assertErrorMsgContains("reserved", function()
+        self.registry:RegisterNodeType(Registry.UNKNOWN_TYPE, {
+            category = "trigger",
+            pins = {},
+            run = function() end,
+        })
+    end)
+end
+
+function TestRegistry:testHiddenTypesExcludedFromCategoryQuery()
+    self.registry:RegisterNodeType("test.visible", {
+        category = "misc",
+        pins = {},
+        run = function() end,
+    })
+    self.registry:RegisterNodeType("test.secret", {
+        category = "misc",
+        hidden = true,
+        pins = {},
+        run = function() end,
+    })
+
+    local misc = self.registry:GetNodeTypesByCategory("misc")
+    luaunit.assertEquals(#misc, 1)
+    luaunit.assertEquals(misc[1].key, "test.visible")
+end
+
 function TestRegistry:testDataTypeRoundTrip()
     local coordType = {
         encode = function(v) return v.x .. "," .. v.y end,

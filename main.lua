@@ -12,6 +12,12 @@ LibNodeGraph = {}
 LibNodeGraph.NewRegistry = Registry.new
 LibNodeGraph.NewGraph = Graph.new
 
+-- The reserved placeholder Node Type key a lenient Deserialize assigns to a node whose real
+-- type is missing (see serialize.lua's onUnknown = "placeholder"). Exposed so a consumer —
+-- e.g. the Watchdog editor — can detect a placeholder (`node.typeKey == LibNodeGraph.UNKNOWN_TYPE`)
+-- to render it read-only, without hardcoding the string.
+LibNodeGraph.UNKNOWN_TYPE = Registry.UNKNOWN_TYPE
+
 LibNodeGraph.Serialize = Serialize.Serialize
 LibNodeGraph.Deserialize = Serialize.Deserialize
 LibNodeGraph.ExportJSON = Serialize.ExportJSON

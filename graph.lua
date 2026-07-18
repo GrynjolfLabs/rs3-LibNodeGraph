@@ -9,6 +9,7 @@
 ---@field controls table<string, any>     # per-data-input Control values, keyed by pin name
 ---@field values table<string, any>       # last computed output value per pin; runtime-only
 ---@field state table                     # per-node persistent scratch (ctx.state); runtime-only
+---@field unknown? { type: string, controls: table<string, any> }  # set only on a `__unknown__` placeholder: the original type key + raw (codec-encoded) controls, re-emitted verbatim by Serialize
 
 ---A directed edge between two pins. Connects an output pin (`from*`) to an input pin (`to*`);
 ---exec pins carry flow, data pins carry values. See Graph:Connect for the validity rules.
@@ -247,6 +248,27 @@ end
 
 function Graph:Disconnect(connectionId)
     self.connections[connectionId] = nil
+end
+
+-- Unchecked connection insert, bypassing every rule Connect enforces (pin existence, direction,
+-- kind/type match, single-data-input, cycle). Used only by a lenient Deserialize to restore a
+-- wire that touches a `__unknown__` placeholder: the placeholder has no pins, so the validated
+-- Connect path could never accept the wire, yet the wire must survive verbatim to round-trip
+-- losslessly once the real type returns. Not for general use — a hand-built graph should always
+-- go through Connect.
+---@param record { fromNode: integer, fromPin: string, toNode: integer, toPin: string }
+---@return integer id
+function Graph:_insertRawConnection(record)
+    local id = self.nextConnectionId
+    self.nextConnectionId = id + 1
+    self.connections[id] = {
+        id = id,
+        fromNode = record.fromNode,
+        fromPin = record.fromPin,
+        toNode = record.toNode,
+        toPin = record.toPin,
+    }
+    return id
 end
 
 function Graph:_findSourceConnection(nodeId, pinName)

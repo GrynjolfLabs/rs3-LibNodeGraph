@@ -204,4 +204,198 @@ function TestSerialize:testDeserializeRejectsConnectionToUnknownNodeId()
     end)
 end
 
+--- Unknown-node preservation (issue #1) --------------------------------------------------
+
+function TestSerialize:testPlaceholderRoundTripIsLossless()
+    -- fixture.ghost is not in buildRegistry(), so it deserializes as a placeholder. Serializing
+    -- the result must reproduce the ON-DISK form byte-for-byte (the canonical table, key-order
+    -- independent): original type key and raw controls re-emitted verbatim, wire intact.
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = { foo = "bar", n = 3 } },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    luaunit.assertEquals(graph.nodes[2].typeKey, "__unknown__")
+
+    local reserialized = Serialize.Serialize(graph)
+    luaunit.assertEquals(reserialized, data)
+end
+
+function TestSerialize:testKnownToUnknownWireSurvivesAsLiveConnection()
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = {} },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    local conns = graph:GetConnections()
+    luaunit.assertEquals(#conns, 1)
+    luaunit.assertEquals(conns[1].fromNode, 1)
+    luaunit.assertEquals(conns[1].toNode, 2)
+    luaunit.assertEquals(graph.nodes[2].typeKey, "__unknown__")
+end
+
+function TestSerialize:testPlaceholderIsInertWhenFiredInto()
+    -- A known upstream trigger firing into the placeholder must dead-end there (no throw).
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = {} },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    graph:Fire(1)  -- must not throw
+
+    -- The placeholder was reached (executed) but fired nothing onward.
+    local sawPlaceholderExecute, sawFireFromPlaceholder = false, false
+    for _, entry in ipairs(graph:GetLastTrace()) do
+        if entry.type == "execute" and entry.node == 2 then sawPlaceholderExecute = true end
+        if entry.type == "fire" and entry.node == 2 then sawFireFromPlaceholder = true end
+    end
+    luaunit.assertIsTrue(sawPlaceholderExecute)
+    luaunit.assertIsFalse(sawFireFromPlaceholder)
+end
+
+function TestSerialize:testPullingFromPlaceholderYieldsNil()
+    local reg = buildRegistry()
+    local ran = false
+    local pulled = "SENTINEL"
+    reg.nodeTypes["fixture.action"].run = function(ctx)
+        ran = true
+        pulled = ctx:In("value")
+    end
+
+    -- The placeholder feeds action.value; even though the control is 7, the incoming wire wins
+    -- and pulls from the inert placeholder -> nil, without throwing.
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.ghost", controls = {} },
+            { id = 2, type = "fixture.action", controls = { value = 7 } },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "value" },
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, reg, { onUnknown = "placeholder" })
+    graph:FireInput(2, "in")
+
+    luaunit.assertIsTrue(ran)
+    luaunit.assertIsNil(pulled)
+end
+
+function TestSerialize:testPlaceholderRestoresToRealNodeWhenTypeReturns()
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = { tag = 7 } },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },
+        },
+    }
+
+    -- Load while missing -> placeholder, then re-save (still lossless).
+    local missing = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    local saved = Serialize.Serialize(missing)
+
+    -- The type comes back: an ordinary (default, strict) deserialize rebuilds the real node.
+    local reg = buildRegistry()
+    reg:RegisterNodeType("fixture.ghost", {
+        category = "action",
+        pins = {
+            { name = "in", kind = "exec", direction = "in", terminates = true },
+            { name = "tag", kind = "data", direction = "in", dataType = "number", default = 0 },
+        },
+        run = function() end,
+    })
+    local restored = Serialize.Deserialize(saved, reg)
+
+    luaunit.assertEquals(restored.nodes[2].typeKey, "fixture.ghost")
+    luaunit.assertEquals(restored:GetControl(2, "tag"), 7)
+    luaunit.assertEquals(#restored:GetConnections(), 1)
+end
+
+function TestSerialize:testLenientDeserializeIsTotal()
+    -- (a) an unknown type, (b) a wire to a missing pin on a known node, (c) a kind-mismatched
+    -- wire between known nodes. Placeholder mode must deserialize all three without throwing;
+    -- (b) and (c) are dropped, the placeholder wire (a) is kept.
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = {} },
+            { id = 3, type = "fixture.add", controls = { a = 1, b = 2 } },
+            { id = 4, type = "fixture.action", controls = {} },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },           -- known -> placeholder
+            { fromNode = 1, fromPin = "out", toNode = 4, toPin = "nonexistent" },  -- (b) missing pin
+            { fromNode = 3, fromPin = "sum", toNode = 4, toPin = "in" },           -- (c) data -> exec
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+
+    local conns = graph:GetConnections()
+    luaunit.assertEquals(#conns, 1)
+    luaunit.assertEquals(conns[1].toNode, 2)
+end
+
+function TestSerialize:testSkipModeDropsUnknownNodeAndItsWires()
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 2, type = "fixture.ghost", controls = {} },     -- unknown -> dropped
+            { id = 3, type = "fixture.action", controls = {} },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 2, toPin = "in" },  -- touches dropped node
+            { fromNode = 1, fromPin = "out", toNode = 3, toPin = "in" },  -- known -> known, kept
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "skip" })
+
+    luaunit.assertIsNil(graph.nodes[2])
+    luaunit.assertNotIsNil(graph.nodes[1])
+    luaunit.assertNotIsNil(graph.nodes[3])
+
+    local conns = graph:GetConnections()
+    luaunit.assertEquals(#conns, 1)
+    luaunit.assertEquals(conns[1].toNode, 3)
+
+    -- A dropped node's id is still reserved, so a fresh AddNode can't collide with it.
+    local fresh = graph:AddNode("fixture.add")
+    luaunit.assertEquals(fresh, 4)
+end
+
+function TestSerialize:testInvalidOnUnknownOptionRejected()
+    luaunit.assertErrorMsgContains("onUnknown", function()
+        Serialize.Deserialize({ version = 1, nodes = {}, connections = {} },
+            self.registry, { onUnknown = "bogus" })
+    end)
+end
+
 return TestSerialize
