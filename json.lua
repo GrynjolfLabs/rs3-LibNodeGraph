@@ -234,14 +234,24 @@ end
 
 --- Codec seam -----------------------------------------------------------------------
 
+---A JSON codec: the pair of pure functions LibNodeGraph and its consumers use to cross the
+---string boundary. `Json.Bundled` is the built-in implementation; a consumer may swap in a
+---native client codec via SetDefault, provided it satisfies this same shape.
+---@class LibNodeGraph.Codec
+---@field encode fun(value: any): string   # Lua value -> JSON text
+---@field decode fun(text: string): any    # JSON text -> Lua value
+
+---@type LibNodeGraph.Codec
 Json.Bundled = {
     encode = encodeValue,
     decode = decode,
 }
 
 -- Swapped out by the consumer if/when a native client JSON API becomes available.
+---@type LibNodeGraph.Codec
 Json.Default = Json.Bundled
 
+---@param codec LibNodeGraph.Codec
 function Json.SetDefault(codec)
     assert(type(codec) == "table" and type(codec.encode) == "function" and type(codec.decode) == "function",
         "codec must provide encode(table) and decode(string) functions")

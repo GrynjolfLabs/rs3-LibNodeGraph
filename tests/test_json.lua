@@ -69,6 +69,9 @@ end
 
 function TestJson:testSetDefaultRequiresEncodeAndDecodeFunctions()
     luaunit.assertError(function()
+        -- Intentionally malformed (no decode; encode returns nothing) to prove SetDefault's
+        -- runtime guard rejects it — the type violation here is the point of the test.
+        ---@diagnostic disable-next-line: missing-return
         Json.SetDefault({ encode = function() end })
     end)
 end

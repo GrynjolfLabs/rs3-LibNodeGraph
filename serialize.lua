@@ -6,10 +6,32 @@
 local Graph = require("graph")
 local Json = require("json")
 
+---The flat, JSON-safe form of a graph — what a consumer persists or shares. Distinct from the
+---live `LibNodeGraph.Graph`: it drops all runtime state (a node's `values`/`state`, the id
+---counters), keys nothing by id (nodes/connections are ordered arrays so JSON stays clean), and
+---encodes Control values through their Data Type codecs. Round-trips via Serialize/Deserialize.
+---@class LibNodeGraph.SerializedNode
+---@field id integer
+---@field type string                     # the Node Type key (live Node calls this `typeKey`)
+---@field controls table<string, any>     # codec-encoded Control values, keyed by pin name
+
+---@class LibNodeGraph.SerializedConnection
+---@field fromNode integer
+---@field fromPin string
+---@field toNode integer
+---@field toPin string
+
+---@class LibNodeGraph.SerializedGraph
+---@field version integer                 # schema version, for future migrations
+---@field nodes LibNodeGraph.SerializedNode[]
+---@field connections LibNodeGraph.SerializedConnection[]
+
 local Serialize = {}
 
 local CURRENT_VERSION = 1
 
+---@param graph LibNodeGraph.Graph
+---@return LibNodeGraph.SerializedGraph
 function Serialize.Serialize(graph)
     local registry = graph.registry
 
@@ -55,6 +77,9 @@ function Serialize.Serialize(graph)
     }
 end
 
+---@param data LibNodeGraph.SerializedGraph
+---@param registry LibNodeGraph.Registry
+---@return LibNodeGraph.Graph
 function Serialize.Deserialize(data, registry)
     assert(type(data) == "table", "Deserialize requires a table")
 

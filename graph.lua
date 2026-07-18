@@ -1,5 +1,34 @@
 -- `Graph.__index = Graph` is set inside Graph.new, NOT at the top level: a self-referential
 -- module table triggers an infinite traversal in the client at require time (freeze+crash).
+
+---A single node instance living in a Graph. Runtime-only fields (`values`, `state`) are never
+---serialized (see serialize.lua); only `id`, `typeKey`, and `controls` round-trip.
+---@class LibNodeGraph.Node
+---@field id integer                      # stable, unique within its Graph; assigned by AddNode
+---@field typeKey string                  # the registered Node Type key (see Registry)
+---@field controls table<string, any>     # per-data-input Control values, keyed by pin name
+---@field values table<string, any>       # last computed output value per pin; runtime-only
+---@field state table                     # per-node persistent scratch (ctx.state); runtime-only
+
+---A directed edge between two pins. Connects an output pin (`from*`) to an input pin (`to*`);
+---exec pins carry flow, data pins carry values. See Graph:Connect for the validity rules.
+---@class LibNodeGraph.Connection
+---@field id integer                      # stable, unique within its Graph
+---@field fromNode integer                # source node id
+---@field fromPin string                  # source (output) pin name
+---@field toNode integer                  # target node id
+---@field toPin string                    # target (input) pin name
+
+---The live, mutable graph: the authored node network plus the bookkeeping to run it. This is
+---the in-memory object the editor and runtime operate on — distinct from the flat, persistable
+---`LibNodeGraph.SerializedGraph` that Serialize/Deserialize convert to and from.
+---@class LibNodeGraph.Graph
+---@field registry LibNodeGraph.Registry           # the Node Type registry this graph resolves against
+---@field nodes table<integer, LibNodeGraph.Node>  # all nodes, keyed by node id
+---@field connections table<integer, LibNodeGraph.Connection>  # all edges, keyed by connection id
+---@field nextNodeId integer              # id handed to the next AddNode
+---@field nextConnectionId integer        # id handed to the next Connect
+---@field lastTrace table                 # exec path of the most recent Fire, for debugging
 local Graph = {}
 
 -- Backstop against engine bugs; graphs are cycle-checked at connect-time so this
@@ -26,6 +55,8 @@ local function copyDefault(value)
     return value
 end
 
+---@param registry LibNodeGraph.Registry
+---@return LibNodeGraph.Graph
 function Graph.new(registry)
     Graph.__index = Graph
     assert(registry ~= nil, "Graph.new requires a Registry")
@@ -42,6 +73,9 @@ end
 
 --- Structure: nodes, connections ---------------------------------------------------
 
+---@param typeKey string                  # a registered Node Type key
+---@param controls table<string, any>|nil # optional initial Control values, keyed by pin name
+---@return integer id                      # the new node's stable id
 function Graph:AddNode(typeKey, controls)
     local nodeType = self.registry:GetNodeType(typeKey)
     assert(nodeType ~= nil, "unknown node type '" .. tostring(typeKey) .. "'")
@@ -245,6 +279,7 @@ function Graph:SetControl(nodeId, pinName, value)
     node.controls[pinName] = value
 end
 
+---@return any  # the Control's current value (arbitrary — a scalar, a {x,y}, etc.); nil if no such node
 function Graph:GetControl(nodeId, pinName)
     local node = self.nodes[nodeId]
     if node == nil then
@@ -263,6 +298,9 @@ end
 
 --- Read-only inspection (docs/adr/0006) -------------------------------------------------
 
+---A lightweight projection — id + type only, NOT the full LibNodeGraph.Node (Controls/values/
+---state are deliberately withheld; mutate through the Graph methods, not this snapshot).
+---@return { id: integer, typeKey: string }[]
 function Graph:GetNodes()
     local out = {}
     for _, node in pairs(self.nodes) do
@@ -282,6 +320,7 @@ function Graph:GetNodesByCategory(category)
     return out
 end
 
+---@return LibNodeGraph.Connection[]
 function Graph:GetConnections()
     local out = {}
     for _, conn in pairs(self.connections) do
