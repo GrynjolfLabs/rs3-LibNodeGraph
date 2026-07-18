@@ -200,36 +200,44 @@ end
 
 --- Connect validation ---------------------------------------------------------------
 
+function TestGraph:testConnectRejectsUnknownPin()
+    local triggerId = self.graph:AddNode("fixture.trigger")
+    local actionId = self.graph:AddNode("fixture.action")
+    local id, reason = self.graph:Connect(triggerId, "nope", actionId, "in")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "unknown_pin")
+end
+
 function TestGraph:testConnectRejectsExecToDataKindMismatch()
     local triggerId = self.graph:AddNode("fixture.trigger")
     local addId = self.graph:AddNode("fixture.add")
-    luaunit.assertError(function()
-        self.graph:Connect(triggerId, "out", addId, "a")
-    end)
+    local id, reason = self.graph:Connect(triggerId, "out", addId, "a")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "kind_mismatch")
 end
 
 function TestGraph:testConnectRejectsFromInputPin()
     local addId = self.graph:AddNode("fixture.add")
     local action = self.graph:AddNode("fixture.action")
-    luaunit.assertErrorMsgContains("not an output pin", function()
-        self.graph:Connect(addId, "a", action, "value")
-    end)
+    local id, reason = self.graph:Connect(addId, "a", action, "value")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "not_output")
 end
 
 function TestGraph:testConnectRejectsToOutputPin()
     local addId = self.graph:AddNode("fixture.add")
     local add2Id = self.graph:AddNode("fixture.add")
-    luaunit.assertErrorMsgContains("not an input pin", function()
-        self.graph:Connect(addId, "sum", add2Id, "sum")
-    end)
+    local id, reason = self.graph:Connect(addId, "sum", add2Id, "sum")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "not_input")
 end
 
 function TestGraph:testConnectRejectsDataTypeMismatch()
     local addId = self.graph:AddNode("fixture.add")
     local coordId = self.graph:AddNode("fixture.coord")
-    luaunit.assertErrorMsgContains("data type mismatch", function()
-        self.graph:Connect(addId, "sum", coordId, "pos")
-    end)
+    local id, reason = self.graph:Connect(addId, "sum", coordId, "pos")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "type_mismatch")
 end
 
 function TestGraph:testConnectAllowsAnyWildcard()
@@ -245,9 +253,31 @@ function TestGraph:testConnectRejectsSecondConnectionToSameDataInput()
     local actionId = self.graph:AddNode("fixture.action")
 
     self.graph:Connect(addId, "sum", actionId, "value")
-    luaunit.assertErrorMsgContains("already has a connection", function()
-        self.graph:Connect(add2Id, "sum", actionId, "value")
-    end)
+    local id, reason = self.graph:Connect(add2Id, "sum", actionId, "value")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "data_input_occupied")
+end
+
+function TestGraph:testConnectRejectsExactDuplicateEdge()
+    local triggerId = self.graph:AddNode("fixture.trigger")
+    local actionId = self.graph:AddNode("fixture.action")
+
+    self.graph:Connect(triggerId, "out", actionId, "in")
+    local id, reason = self.graph:Connect(triggerId, "out", actionId, "in")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "duplicate")
+    -- the graph never holds two identical edges
+    luaunit.assertEquals(#self.graph:GetConnections(), 1)
+end
+
+function TestGraph:testFindConnectionMatchesExactTupleOnly()
+    local triggerId = self.graph:AddNode("fixture.trigger")
+    local actionId = self.graph:AddNode("fixture.action")
+    local action2Id = self.graph:AddNode("fixture.action2")
+    self.graph:Connect(triggerId, "out", actionId, "in")
+
+    luaunit.assertNotIsNil(self.graph:FindConnection(triggerId, "out", actionId, "in"))
+    luaunit.assertIsNil(self.graph:FindConnection(triggerId, "out", action2Id, "in"))
 end
 
 function TestGraph:testConnectAllowsMultipleConnectionsIntoSameExecInput()
@@ -274,9 +304,9 @@ end
 
 function TestGraph:testConnectRejectsDirectDataSelfLoop()
     local addId = self.graph:AddNode("fixture.add")
-    luaunit.assertErrorMsgContains("cycle", function()
-        self.graph:Connect(addId, "sum", addId, "a")
-    end)
+    local id, reason = self.graph:Connect(addId, "sum", addId, "a")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "cycle")
 end
 
 function TestGraph:testConnectRejectsExecCycleBetweenTwoNodes()
@@ -284,9 +314,9 @@ function TestGraph:testConnectRejectsExecCycleBetweenTwoNodes()
     local counterB = self.graph:AddNode("fixture.counter")
 
     self.graph:Connect(counterA, "out", counterB, "step")
-    luaunit.assertErrorMsgContains("cycle", function()
-        self.graph:Connect(counterB, "out", counterA, "step")
-    end)
+    local id, reason = self.graph:Connect(counterB, "out", counterA, "step")
+    luaunit.assertIsNil(id)
+    luaunit.assertEquals(reason, "cycle")
 end
 
 function TestGraph:testConnectAllowsLoopIntoTerminator()
@@ -342,12 +372,18 @@ function TestGraph:testFireRunsActionOnce()
 end
 
 function TestGraph:testFirePerArrivalRunsNodeOncePerIncomingSignal()
+    -- Two arrivals into one exec input via two DISTINCT sources (identical wires are now
+    -- rejected as duplicates): a trigger fans out to two counters, each of which fires into
+    -- the same action input -> the action runs once per arrival.
     local triggerId = self.graph:AddNode("fixture.trigger")
+    local counterA = self.graph:AddNode("fixture.counter")
+    local counterB = self.graph:AddNode("fixture.counter")
     local actionId = self.graph:AddNode("fixture.action")
 
-    -- two separate wires between the same pair of pins: two arrivals in one Fire
-    self.graph:Connect(triggerId, "out", actionId, "in")
-    self.graph:Connect(triggerId, "out", actionId, "in")
+    self.graph:Connect(triggerId, "out", counterA, "step")
+    self.graph:Connect(triggerId, "out", counterB, "step")
+    self.graph:Connect(counterA, "out", actionId, "in")
+    self.graph:Connect(counterB, "out", actionId, "in")
 
     self.graph:Fire(triggerId)
 

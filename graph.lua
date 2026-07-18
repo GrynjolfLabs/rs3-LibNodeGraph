@@ -210,29 +210,46 @@ end
 
 --- Connections -----------------------------------------------------------------------
 
+-- Adds a directed edge. Returns the new connection id on success, or `nil, reason` on any
+-- rejection — a uniform result contract (no asserts): consumers switch on `reason` rather
+-- than catching a thrown error. Reason codes: "unknown_pin", "not_output", "not_input",
+-- "kind_mismatch", "type_mismatch", "duplicate", "data_input_occupied", "cycle".
+-- An exact-duplicate edge is rejected outright ("duplicate"), so the graph can never hold two
+-- identical wires; the "duplicate" check runs before "data_input_occupied" so a same-source
+-- data re-drag reports "duplicate" (which the editor turns into a toggle-off), not "occupied".
+---@return integer|nil id, string? reason
 function Graph:Connect(fromNode, fromPin, toNode, toPin)
     local fromPinDef = self:_getPin(fromNode, fromPin)
     local toPinDef = self:_getPin(toNode, toPin)
-    assert(fromPinDef ~= nil, "unknown pin '" .. tostring(fromPin) .. "' on node " .. tostring(fromNode))
-    assert(toPinDef ~= nil, "unknown pin '" .. tostring(toPin) .. "' on node " .. tostring(toNode))
-    assert(fromPinDef.direction == "out", "'" .. fromPin .. "' is not an output pin")
-    assert(toPinDef.direction == "in", "'" .. toPin .. "' is not an input pin")
-    assert(fromPinDef.kind == toPinDef.kind, "cannot connect an exec pin to a data pin")
+    if fromPinDef == nil or toPinDef == nil then return nil, "unknown_pin" end
+    if fromPinDef.direction ~= "out" then return nil, "not_output" end
+    if toPinDef.direction ~= "in" then return nil, "not_input" end
+    if fromPinDef.kind ~= toPinDef.kind then return nil, "kind_mismatch" end
 
     if fromPinDef.kind == "data" then
         local fromTag, toTag = fromPinDef.dataType, toPinDef.dataType
-        assert(fromTag == toTag or fromTag == "any" or toTag == "any",
-            "data type mismatch: '" .. tostring(fromTag) .. "' -> '" .. tostring(toTag) .. "'")
+        if not (fromTag == toTag or fromTag == "any" or toTag == "any") then
+            return nil, "type_mismatch"
+        end
+    end
+
+    if self:FindConnection(fromNode, fromPin, toNode, toPin) ~= nil then
+        return nil, "duplicate"
+    end
+
+    if toPinDef.kind == "data" then
         for _, conn in pairs(self.connections) do
-            assert(not (conn.toNode == toNode and conn.toPin == toPin),
-                "data input '" .. toPin .. "' on node " .. tostring(toNode) .. " already has a connection")
+            if conn.toNode == toNode and conn.toPin == toPin then
+                return nil, "data_input_occupied"
+            end
         end
     end
 
     local fromKey, toKey = fromNode .. ":" .. fromPin, toNode .. ":" .. toPin
     local edges = self:_buildPropagationEdges()
-    assert(not self:_canReach(edges, toKey, fromKey),
-        "connecting '" .. fromPin .. "' -> '" .. toPin .. "' would create a cycle")
+    if self:_canReach(edges, toKey, fromKey) then
+        return nil, "cycle"
+    end
 
     local id = self.nextConnectionId
     self.nextConnectionId = id + 1
@@ -244,6 +261,19 @@ function Graph:Connect(fromNode, fromPin, toNode, toPin)
         toPin = toPin,
     }
     return id
+end
+
+-- Returns the existing edge matching the exact (fromNode, fromPin, toNode, toPin) tuple, or nil.
+-- Used by Connect's duplicate guard and by the editor's toggle-off gesture.
+---@return LibNodeGraph.Connection|nil
+function Graph:FindConnection(fromNode, fromPin, toNode, toPin)
+    for _, conn in pairs(self.connections) do
+        if conn.fromNode == fromNode and conn.fromPin == fromPin
+            and conn.toNode == toNode and conn.toPin == toPin then
+            return conn
+        end
+    end
+    return nil
 end
 
 function Graph:Disconnect(connectionId)

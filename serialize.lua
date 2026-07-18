@@ -184,18 +184,22 @@ function Serialize.Deserialize(data, registry, opts)
             -- Placeholders only exist in lenient mode, so this path never runs under "error".
             graph:_insertRawConnection(connData)
         elseif not lenient then
-            graph:Connect(connData.fromNode, connData.fromPin, connData.toNode, connData.toPin)
+            -- Connect reports a rejection reason rather than throwing (uniform result contract);
+            -- strict mode still fails the load loudly on any bad wire.
+            local id, reason = graph:Connect(
+                connData.fromNode, connData.fromPin, connData.toNode, connData.toPin)
+            assert(id ~= nil, "connection rejected during deserialize: " .. tostring(reason))
         else
             -- Known <-> known in lenient mode: honor each wire independently. A wire the graph
-            -- rejects (missing pin, type mismatch, cycle, duplicate data input in a corrupt
-            -- save) is dropped and logged rather than taking down the whole load.
-            local ok, err = pcall(graph.Connect, graph,
+            -- rejects (missing pin, type mismatch, cycle, duplicate/occupied data input in a
+            -- corrupt save) is dropped and logged rather than taking down the whole load.
+            local id, reason = graph:Connect(
                 connData.fromNode, connData.fromPin, connData.toNode, connData.toPin)
-            if not ok then
+            if id == nil then
                 warn("dropping invalid connection "
                     .. tostring(connData.fromNode) .. ":" .. tostring(connData.fromPin) .. " -> "
                     .. tostring(connData.toNode) .. ":" .. tostring(connData.toPin)
-                    .. " (" .. tostring(err) .. ")")
+                    .. " (" .. tostring(reason) .. ")")
             end
         end
     end
