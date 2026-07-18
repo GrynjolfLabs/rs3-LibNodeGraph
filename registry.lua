@@ -14,6 +14,7 @@
 ---@class LibNodeGraph.NodeTypeDef
 ---@field category string
 ---@field displayName string|nil
+---@field description string|nil      # optional one-line blurb shown in the Palette (see Watchdog ui/palette.lua)
 ---@field pins LibNodeGraph.PinDef[]
 ---@field run fun(ctx: LibNodeGraph.RunContext)
 ---@field preload? fun(node: table)   # optional resource-preload hook (see Watchdog runtime)
@@ -68,6 +69,7 @@ function Registry:RegisterNodeType(key, definition)
         key = key,
         category = definition.category,
         displayName = definition.displayName or key,
+        description = definition.description,  -- optional Palette blurb (see Watchdog ui/palette.lua)
         pins = pins,
         pinOrder = pinOrder,
         run = definition.run,
