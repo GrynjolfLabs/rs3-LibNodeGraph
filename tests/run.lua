@@ -19,5 +19,6 @@ require("test_registry")
 require("test_graph")
 require("test_json")
 require("test_serialize")
+require("test_modes")
 
 os.exit(luaunit.LuaUnit.run())

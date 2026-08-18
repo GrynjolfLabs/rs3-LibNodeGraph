@@ -96,6 +96,12 @@ Control — there is no separate node-property concept.
 _Avoid_: Property, setting, field, default (the declared fallback is the "default"; the
 per-instance value is the Control)
 
+**Mode**:
+A named pin-set on a Node Type. A live Node stores `mode` as instance metadata (not a Data
+Pin). `Graph:SetMode` reconstructs in place: same id, new pin list; Connections and Controls
+for vanished Pins are dropped. Types that omit `modes` have `Node.mode` / `ctx.mode` nil.
+_Avoid_: Variant, preset, profile, pin-set (in prose — that's the implementation)
+
 **Fire**:
 To begin execution at a Trigger, pushing control flow along Execution Connections until it
 reaches Actions. Optionally carries a Payload for the entered Trigger.
@@ -125,7 +131,7 @@ _Avoid_: Log, history, timeline, journal
 
 Every Node Type's `run` receives one argument, `ctx`, whose complete shape is the
 `LibNodeGraph.RunContext` class defined in [graph.lua](graph.lua) (`nodeId`, `payload`,
-`exec`, `state`, and the methods `In`/`Out`/`Fire`). That class is the single source of truth;
+`exec`, `mode`, `state`, and the methods `In`/`Out`/`Fire`). That class is the single source of truth;
 `_makeCtx` is kept in lockstep with it. This contract has been silently mis-assumed before — a
 node read `ctx.pin`/`ctx.id` (fields the engine never sets) instead of `ctx.exec`/`ctx.nodeId`,
 and nothing caught it — so three independent guards now exist, and a node author should rely on

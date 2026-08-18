@@ -1,12 +1,14 @@
 ---A single node instance living in a Graph. Runtime-only fields (`values`, `state`) are never
----serialized (see serialize.lua); only `id`, `typeKey`, and `controls` round-trip.
+---serialized (see serialize.lua); `id`, `typeKey`, `controls`, and `mode` (when the type has
+---modes) round-trip.
 ---@class LibNodeGraph.Node
 ---@field id integer                      # stable, unique within its Graph; assigned by AddNode
 ---@field typeKey string                  # the registered Node Type key (see Registry)
+---@field mode string|nil                 # current mode key; nil if the type has no modes (ADR-0011)
 ---@field controls table<string, any>     # per-data-input Control values, keyed by pin name
 ---@field values table<string, any>       # last computed output value per pin; runtime-only
 ---@field state table                     # per-node persistent scratch (ctx.state); runtime-only
----@field unknown? { type: string, controls: table<string, any> }  # set only on a `__unknown__` placeholder: the original type key + raw (codec-encoded) controls, re-emitted verbatim by Serialize
+---@field unknown? { type: string, controls: table<string, any>, mode: string|nil }  # set only on a `__unknown__` placeholder: the original type key + raw controls + mode, re-emitted verbatim by Serialize
 
 ---A directed edge between two pins. Connects an output pin (`from*`) to an input pin (`to*`);
 ---exec pins carry flow, data pins carry values. See Graph:Connect for the validity rules.
@@ -30,13 +32,19 @@
 local Graph = {}
 Graph.__index = Graph
 
+local Registry = require("registry")
+
 -- Backstop against engine bugs; graphs are cycle-checked at connect-time so this
 -- should never be hit in practice (see docs/adr/0004-execution-semantics.md).
 local MAX_DEPTH = 256
 
-local function hasExecPins(nodeType)
-    for _, pinName in ipairs(nodeType.pinOrder) do
-        if nodeType.pins[pinName].kind == "exec" then
+local function pinsOf(node, nodeType)
+    return Registry.pinSet(nodeType, node.mode)
+end
+
+local function hasExecPins(pins, pinOrder)
+    for _, pinName in ipairs(pinOrder) do
+        if pins[pinName].kind == "exec" then
             return true
         end
     end
@@ -73,17 +81,28 @@ end
 
 ---@param typeKey string                  # a registered Node Type key
 ---@param controls table<string, any>|nil # optional initial Control values, keyed by pin name
+---@param mode string|nil                 # optional mode key; missing → defaultMode when the type has modes
 ---@return integer id                      # the new node's stable id
-function Graph:AddNode(typeKey, controls)
+function Graph:AddNode(typeKey, controls, mode)
     local nodeType = self.registry:GetNodeType(typeKey)
     assert(nodeType ~= nil, "unknown node type '" .. tostring(typeKey) .. "'")
 
     local id = self.nextNodeId
     self.nextNodeId = id + 1
 
+    local nodeMode = nil
+    if nodeType.modes ~= nil then
+        if mode ~= nil and nodeType.modes[mode] ~= nil then
+            nodeMode = mode
+        else
+            nodeMode = nodeType.defaultMode
+        end
+    end
+
+    local pins, pinOrder = pinsOf({ mode = nodeMode }, nodeType)
     local nodeControls = {}
-    for _, pinName in ipairs(nodeType.pinOrder) do
-        local pin = nodeType.pins[pinName]
+    for _, pinName in ipairs(pinOrder) do
+        local pin = pins[pinName]
         if pin.kind == "data" and pin.direction == "in" then
             if controls ~= nil and controls[pinName] ~= nil then
                 nodeControls[pinName] = controls[pinName]
@@ -96,6 +115,7 @@ function Graph:AddNode(typeKey, controls)
     self.nodes[id] = {
         id = id,
         typeKey = typeKey,
+        mode = nodeMode,
         controls = nodeControls,
         values = {},
         -- Per-node persistent scratch, exposed to run as ctx.state. Survives across
@@ -127,7 +147,67 @@ function Graph:_getPin(nodeId, pinName)
     if nodeType == nil then
         return nil
     end
-    return nodeType.pins[pinName]
+    local pins = pinsOf(node, nodeType)
+    return pins[pinName]
+end
+
+---@return string|nil
+function Graph:GetMode(id)
+    local node = self.nodes[id]
+    if node == nil then
+        return nil
+    end
+    return node.mode
+end
+
+-- Reconstruct in place: same node id, new pin list. Wires and Controls for vanished pins
+-- are dropped; shared pin names keep their wires/values; missing data-ins are seeded
+-- from the new mode's defaults. Unknown key: no-op, returns false (does not throw).
+---@param id integer
+---@param mode string
+---@return boolean
+function Graph:SetMode(id, mode)
+    local node = self.nodes[id]
+    if node == nil then
+        return false
+    end
+    local nodeType = self.registry:GetNodeType(node.typeKey)
+    if nodeType == nil or nodeType.modes == nil or nodeType.modes[mode] == nil then
+        return false
+    end
+    if node.mode == mode then
+        return true
+    end
+
+    node.mode = mode
+    local pins, pinOrder = pinsOf(node, nodeType)
+
+    for connId, conn in pairs(self.connections) do
+        if (conn.fromNode == id and pins[conn.fromPin] == nil)
+            or (conn.toNode == id and pins[conn.toPin] == nil) then
+            self.connections[connId] = nil
+        end
+    end
+
+    for pinName in pairs(node.controls) do
+        local pin = pins[pinName]
+        if pin == nil or pin.kind ~= "data" or pin.direction ~= "in" then
+            node.controls[pinName] = nil
+        end
+    end
+    for pinName in pairs(node.values) do
+        local pin = pins[pinName]
+        if pin == nil or pin.kind ~= "data" or pin.direction ~= "out" then
+            node.values[pinName] = nil
+        end
+    end
+    for _, pinName in ipairs(pinOrder) do
+        local pin = pins[pinName]
+        if pin.kind == "data" and pin.direction == "in" and node.controls[pinName] == nil then
+            node.controls[pinName] = copyDefault(pin.default)
+        end
+    end
+    return true
 end
 
 --- Cycle detection (docs/adr/0004, rule 4) ------------------------------------------
@@ -155,9 +235,10 @@ function Graph:_buildPropagationEdges()
     for nodeId, node in pairs(self.nodes) do
         local nodeType = self.registry:GetNodeType(node.typeKey)
         if nodeType ~= nil then
+            local pins, pinOrder = pinsOf(node, nodeType)
             local execOutputs, execInputs, dataOutputs, dataInputs = {}, {}, {}, {}
-            for _, pinName in ipairs(nodeType.pinOrder) do
-                local pin = nodeType.pins[pinName]
+            for _, pinName in ipairs(pinOrder) do
+                local pin = pins[pinName]
                 if pin.kind == "exec" and pin.direction == "out" then
                     execOutputs[#execOutputs + 1] = pinName
                 elseif pin.kind == "exec" and pin.direction == "in" and not pin.terminates then
@@ -393,9 +474,10 @@ function Graph:GetPins(nodeId)
     if nodeType == nil then
         return nil
     end
+    local pins, pinOrder = pinsOf(node, nodeType)
     local out = {}
-    for _, pinName in ipairs(nodeType.pinOrder) do
-        local pin = nodeType.pins[pinName]
+    for _, pinName in ipairs(pinOrder) do
+        local pin = pins[pinName]
         out[#out + 1] = {
             name = pin.name,
             kind = pin.kind,
@@ -431,6 +513,7 @@ end
 ---@field nodeId integer                 # this node's own stable id
 ---@field payload T                      # event data on a Trigger entry; nil downstream (ADR-0009)
 ---@field exec string|nil                # which exec input fired; nil for Triggers / pulled Pure Nodes (ADR-0010)
+---@field mode string|nil                # this node's mode key; nil if the type has no modes (ADR-0011)
 ---@field state table                    # per-node scratch, persists across Fires; not serialized
 ---@field In fun(self: LibNodeGraph.RunContext, pin: string): any  # pull a data input
 ---@field Out fun(self: LibNodeGraph.RunContext, pin: string, value: any)  # set a data output
@@ -443,7 +526,7 @@ end
 -- is nil on a Trigger entry and `payload` is nil downstream, so those keys are simply missing
 -- from the table — the allowlist lets a miss on them return nil, and only unknown names error.
 local CTX_FIELDS = {
-    nodeId = true, payload = true, exec = true, state = true,
+    nodeId = true, payload = true, exec = true, mode = true, state = true,
     In = true, Out = true, Fire = true,
 }
 local CTX_GUARD = {
@@ -460,6 +543,7 @@ local CTX_GUARD = {
 ---@return LibNodeGraph.RunContext
 function Graph:_makeCtx(node, nodeType, depth, payload, execPin)
     local graph = self
+    local pins = pinsOf(node, nodeType)
     return setmetatable({
         -- This node's own stable id, so a run can key external state (effect stacks, info
         -- boxes) to the specific node it belongs to rather than the node type.
@@ -468,13 +552,15 @@ function Graph:_makeCtx(node, nodeType, depth, payload, execPin)
         payload = payload,
         -- Which exec input fired this run; nil for Triggers and pulled Pure Nodes.
         exec = execPin,
+        -- Current mode key, or nil when the type has no modes.
+        mode = node.mode,
         -- Per-node persistent state bag (survives across Fires; not serialized).
         state = node.state,
         In = function(_, pinName)
             return graph:_pull(node, pinName, depth)
         end,
         Out = function(_, pinName, value)
-            local pin = nodeType.pins[pinName]
+            local pin = pins[pinName]
             assert(pin ~= nil and pin.kind == "data" and pin.direction == "out",
                 "'" .. tostring(pinName) .. "' is not a data output pin on '" .. nodeType.key .. "'")
             node.values[pinName] = value
@@ -487,7 +573,8 @@ end
 
 function Graph:_pull(node, pinName, depth)
     local nodeType = self.registry:GetNodeType(node.typeKey)
-    local pin = nodeType.pins[pinName]
+    local pins = pinsOf(node, nodeType)
+    local pin = pins[pinName]
     assert(pin ~= nil and pin.kind == "data" and pin.direction == "in",
         "'" .. tostring(pinName) .. "' is not a data input pin on '" .. nodeType.key .. "'")
 
@@ -499,8 +586,9 @@ function Graph:_pull(node, pinName, depth)
     local sourceNode = self.nodes[sourceConn.fromNode]
     assert(sourceNode ~= nil, "dangling connection to missing node " .. tostring(sourceConn.fromNode))
     local sourceType = self.registry:GetNodeType(sourceNode.typeKey)
+    local sourcePins, sourceOrder = pinsOf(sourceNode, sourceType)
 
-    if hasExecPins(sourceType) then
+    if hasExecPins(sourcePins, sourceOrder) then
         -- Execution node: value only meaningful once it has run this Fire (rule 3).
         local value = sourceNode.values[sourceConn.fromPin]
         self:_recordTrace("pull", sourceNode.id, sourceConn.fromPin, value)
@@ -524,7 +612,8 @@ end
 
 function Graph:_fireOutput(node, pinName, depth)
     local nodeType = self.registry:GetNodeType(node.typeKey)
-    local pin = nodeType.pins[pinName]
+    local pins = pinsOf(node, nodeType)
+    local pin = pins[pinName]
     assert(pin ~= nil and pin.kind == "exec" and pin.direction == "out",
         "'" .. tostring(pinName) .. "' is not an exec output pin on '" .. nodeType.key .. "'")
 
@@ -569,7 +658,7 @@ function Graph:FireInput(nodeId, pinName)
     assert(node ~= nil, "unknown node " .. tostring(nodeId))
     local nodeType = self.registry:GetNodeType(node.typeKey)
     assert(nodeType ~= nil, "unknown node type '" .. tostring(node.typeKey) .. "'")
-    local pin = nodeType.pins[pinName]
+    local pin = pinsOf(node, nodeType)[pinName]
     assert(pin ~= nil and pin.kind == "exec" and pin.direction == "in",
         "'" .. tostring(pinName) .. "' is not an exec input pin on '" .. nodeType.key .. "'")
 
