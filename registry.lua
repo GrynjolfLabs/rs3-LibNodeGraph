@@ -16,17 +16,15 @@
 ---@field displayName string|nil
 ---@field description string|nil      # optional one-line blurb shown in the Palette (see Watchdog ui/palette.lua)
 ---@field pins LibNodeGraph.PinDef[]
----@field run fun(ctx: LibNodeGraph.RunContext)
+---@field run fun(ctx: LibNodeGraph.RunContext<any>)
 ---@field preload? fun(node: table)   # optional resource-preload hook (see Watchdog runtime)
 ---@field hidden? boolean             # when true, excluded from palette/category iteration (GetNodeTypesByCategory)
 
--- `Registry.__index = Registry` is set inside Registry.new, NOT at the top level: a
--- self-referential module table triggers an infinite traversal in the client at require time
--- (freeze+crash).
 ---@class LibNodeGraph.Registry
 ---@field nodeTypes table<string, table>  # registered Node Types, keyed by their string key
 ---@field dataTypes table<string, table>  # optional Data Pin Type Tag metadata, keyed by tag
 local Registry = {}
+Registry.__index = Registry
 
 -- The reserved, library-owned Node Type used to preserve a node whose real type is not
 -- registered (see serialize.lua's lenient Deserialize). It is `hidden`, has no pins, and a
@@ -37,7 +35,6 @@ Registry.UNKNOWN_TYPE = "__unknown__"
 
 ---@return LibNodeGraph.Registry
 function Registry.new()
-    Registry.__index = Registry
     local self = setmetatable({
         nodeTypes = {},
         dataTypes = {},

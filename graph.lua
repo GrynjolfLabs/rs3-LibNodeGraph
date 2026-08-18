@@ -1,6 +1,3 @@
--- `Graph.__index = Graph` is set inside Graph.new, NOT at the top level: a self-referential
--- module table triggers an infinite traversal in the client at require time (freeze+crash).
-
 ---A single node instance living in a Graph. Runtime-only fields (`values`, `state`) are never
 ---serialized (see serialize.lua); only `id`, `typeKey`, and `controls` round-trip.
 ---@class LibNodeGraph.Node
@@ -31,6 +28,7 @@
 ---@field nextConnectionId integer        # id handed to the next Connect
 ---@field lastTrace table                 # exec path of the most recent Fire, for debugging
 local Graph = {}
+Graph.__index = Graph
 
 -- Backstop against engine bugs; graphs are cycle-checked at connect-time so this
 -- should never be hit in practice (see docs/adr/0004-execution-semantics.md).
@@ -59,7 +57,6 @@ end
 ---@param registry LibNodeGraph.Registry
 ---@return LibNodeGraph.Graph
 function Graph.new(registry)
-    Graph.__index = Graph
     assert(registry ~= nil, "Graph.new requires a Registry")
     return setmetatable({
         registry = registry,
@@ -430,9 +427,9 @@ end
 -- construction are kept in lockstep with it, and every `run = function(ctx)` in a consumer is
 -- typed against it (see registry.lua's NodeTypeDef.run) so a stray field read (e.g. `ctx.pin`
 -- instead of `ctx.exec`) is a static undefined-field error rather than a silent nil.
----@class LibNodeGraph.RunContext
+---@class LibNodeGraph.RunContext<T>
 ---@field nodeId integer                 # this node's own stable id
----@field payload any                    # event data on a Trigger entry; nil downstream (ADR-0009)
+---@field payload T                      # event data on a Trigger entry; nil downstream (ADR-0009)
 ---@field exec string|nil                # which exec input fired; nil for Triggers / pulled Pure Nodes (ADR-0010)
 ---@field state table                    # per-node scratch, persists across Fires; not serialized
 ---@field In fun(self: LibNodeGraph.RunContext, pin: string): any  # pull a data input
