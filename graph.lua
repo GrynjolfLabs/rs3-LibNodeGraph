@@ -426,6 +426,16 @@ function Graph:GetLastValue(nodeId, pinName)
     return node.values[pinName]
 end
 
+-- Runtime-only Node State (`ctx.state`). Same table the node mutates; never serialized.
+-- Nil if the node does not exist. Empty `{}` before the first run.
+function Graph:GetState(nodeId)
+    local node = self.nodes[nodeId]
+    if node == nil then
+        return nil
+    end
+    return node.state
+end
+
 --- Read-only inspection (docs/adr/0006) -------------------------------------------------
 
 ---A lightweight projection — id + type only, NOT the full LibNodeGraph.Node (Controls/values/

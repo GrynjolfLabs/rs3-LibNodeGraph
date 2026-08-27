@@ -599,6 +599,20 @@ function TestGraph:testCtxStatePersistsAcrossFires()
     luaunit.assertEquals(self.probeLog[3].value, 3)
 end
 
+function TestGraph:testGetStateReturnsTheLiveNodeStateTable()
+    local triggerId = self.graph:AddNode("fixture.trigger")
+    local counterId = self.graph:AddNode("fixture.statecounter")
+    self.graph:Connect(triggerId, "out", counterId, "in")
+
+    luaunit.assertEquals(self.graph:GetState(counterId), {})
+    luaunit.assertNil(self.graph:GetState(999))
+
+    self.graph:Fire(triggerId)
+    luaunit.assertEquals(self.graph:GetState(counterId).n, 1)
+    self.graph:Fire(triggerId)
+    luaunit.assertEquals(self.graph:GetState(counterId).n, 2)
+end
+
 function TestGraph:testCtxStateIsPerNodeInstance()
     local triggerId = self.graph:AddNode("fixture.trigger")
     local counterA = self.graph:AddNode("fixture.statecounter")

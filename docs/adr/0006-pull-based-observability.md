@@ -1,7 +1,7 @@
 # Observability is pull-based; no event/observer bus
 
 The engine exposes graph state through read-only accessors that the consumer pulls whenever it
-renders (`GetNodes`, `GetConnections`, `GetPins`, `GetControl`, `GetLastValue`, `GetLastTrace`)
+renders (`GetNodes`, `GetConnections`, `GetPins`, `GetControl`, `GetLastValue`, `GetState`, `GetLastTrace`)
 rather than emitting change events to subscribers. There is deliberately no observer/event bus.
 
 The decisive reasons are specific to the runtime: the client is frame-based, so a UI renders

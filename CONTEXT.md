@@ -110,8 +110,9 @@ _Avoid_: Run, invoke, execute (as the verb for starting a Trigger), emit
 **Node State**:
 A per-Node table (`ctx.state`) that persists across Fires, giving a stateful Node Type
 (Counter, DoOnce, Gate, FlipFlop) somewhere to remember prior runs. Runtime-only; never
-serialized, so a reloaded Graph starts from a clean slate. A Pure Node must not use it, as
-it re-runs on every pull.
+serialized, so a reloaded Graph starts from a clean slate. The consumer reads it with
+`Graph:GetState` (same pull-based observability as `GetLastValue`). A Pure Node must not
+use it, as it re-runs on every pull.
 _Avoid_: Memory, store, scratch, instance data
 
 **Entered Pin**:
