@@ -1,14 +1,15 @@
 ---A single node instance living in a Graph. Runtime-only fields (`values`, `state`) are never
----serialized (see serialize.lua); `id`, `typeKey`, `controls`, and `mode` (when the type has
----modes) round-trip.
+---serialized (see serialize.lua); `id`, `typeKey`, `controls`, `mode` (when the type has
+---modes), and `name` (when set) round-trip.
 ---@class LibNodeGraph.Node
 ---@field id integer                      # stable, unique within its Graph; assigned by AddNode
 ---@field typeKey string                  # the registered Node Type key (see Registry)
 ---@field mode string|nil                 # current mode key; nil if the type has no modes (ADR-0011)
+---@field name string|nil                 # optional name; omitted from the serialized node when unset
 ---@field controls table<string, any>     # per-data-input Control values, keyed by pin name
 ---@field values table<string, any>       # last computed output value per pin; runtime-only
 ---@field state table                     # per-node persistent scratch (ctx.state); runtime-only
----@field unknown? { type: string, controls: table<string, any>, mode: string|nil }  # set only on a `__unknown__` placeholder: the original type key + raw controls + mode, re-emitted verbatim by Serialize
+---@field unknown? { type: string, controls: table<string, any>, mode: string|nil, name: string|nil }  # set only on a `__unknown__` placeholder: the original type key + raw controls + mode + name, re-emitted verbatim by Serialize
 
 ---A directed edge between two pins. Connects an output pin (`from*`) to an input pin (`to*`);
 ---exec pins carry flow, data pins carry values. See Graph:Connect for the validity rules.

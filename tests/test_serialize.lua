@@ -398,4 +398,119 @@ function TestSerialize:testInvalidOnUnknownOptionRejected()
     end)
 end
 
+--- Optional node name (issue #2) ---------------------------------------------------------
+
+function TestSerialize:testSerializeOmitsNameWhenUnset()
+    local id = self.graph:AddNode("fixture.trigger")
+    luaunit.assertIsNil(self.graph.nodes[id].name)
+
+    local data = Serialize.Serialize(self.graph)
+    luaunit.assertEquals(data.nodes[1].id, id)
+    luaunit.assertEquals(data.nodes[1].type, "fixture.trigger")
+    luaunit.assertIsNil(data.nodes[1].name)
+end
+
+function TestSerialize:testSerializeRoundTripsName()
+    local id = self.graph:AddNode("fixture.trigger")
+    self.graph.nodes[id].name = "Enrage callout"
+
+    local data = Serialize.Serialize(self.graph)
+    luaunit.assertEquals(data.version, 1)
+    luaunit.assertEquals(data.nodes[1].id, id)
+    luaunit.assertEquals(data.nodes[1].type, "fixture.trigger")
+    luaunit.assertEquals(data.nodes[1].name, "Enrage callout")
+
+    local restored = Serialize.Deserialize(data, buildRegistry())
+    luaunit.assertEquals(restored.nodes[id].name, "Enrage callout")
+    luaunit.assertEquals(restored.nodes[id].typeKey, "fixture.trigger")
+end
+
+function TestSerialize:testClearingNameOmitsItAgain()
+    local id = self.graph:AddNode("fixture.add", { a = 2, b = 3 })
+    self.graph.nodes[id].name = "Enrage callout"
+
+    local named = Serialize.Serialize(self.graph)
+    luaunit.assertEquals(named.nodes[1].name, "Enrage callout")
+
+    self.graph.nodes[id].name = nil
+    local cleared = Serialize.Serialize(self.graph)
+    luaunit.assertEquals(cleared.nodes[1].id, id)
+    luaunit.assertEquals(cleared.nodes[1].type, "fixture.add")
+    luaunit.assertEquals(cleared.nodes[1].controls.a, 2)
+    luaunit.assertEquals(cleared.nodes[1].controls.b, 3)
+    luaunit.assertIsNil(cleared.nodes[1].name)
+end
+
+function TestSerialize:testPlaceholderReemitsNameWithOriginalTypeControlsAndMode()
+    local data = {
+        version = 1,
+        nodes = {
+            {
+                id = 1,
+                type = "fixture.ghost",
+                controls = { foo = "bar", n = 3 },
+                mode = "loud",
+                name = "Enrage callout",
+            },
+        },
+        connections = {},
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    luaunit.assertEquals(graph.nodes[1].typeKey, "__unknown__")
+
+    local reserialized = Serialize.Serialize(graph)
+    luaunit.assertEquals(reserialized, data)
+end
+
+function TestSerialize:testPlaceholderWithoutNameOmitsIt()
+    local data = {
+        version = 1,
+        nodes = {
+            {
+                id = 1,
+                type = "fixture.ghost",
+                controls = { foo = "bar", n = 3 },
+                mode = "loud",
+            },
+        },
+        connections = {},
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry(), { onUnknown = "placeholder" })
+    luaunit.assertEquals(graph.nodes[1].typeKey, "__unknown__")
+
+    local reserialized = Serialize.Serialize(graph)
+    luaunit.assertEquals(reserialized, data)
+    luaunit.assertIsNil(reserialized.nodes[1].name)
+end
+
+function TestSerialize:testDeserializeLoadsGraphWithNoNameField()
+    local data = {
+        version = 1,
+        nodes = {
+            { id = 1, type = "fixture.trigger", controls = {} },
+            { id = 3, type = "fixture.action", controls = { value = 7 } },
+        },
+        connections = {
+            { fromNode = 1, fromPin = "out", toNode = 3, toPin = "in" },
+        },
+    }
+
+    local graph = Serialize.Deserialize(data, buildRegistry())
+    luaunit.assertEquals(graph.nodes[1].typeKey, "fixture.trigger")
+    luaunit.assertIsNil(graph.nodes[1].name)
+    luaunit.assertEquals(graph.nodes[3].typeKey, "fixture.action")
+    luaunit.assertIsNil(graph.nodes[3].name)
+    luaunit.assertEquals(graph:GetControl(3, "value"), 7)
+    luaunit.assertEquals(#graph:GetConnections(), 1)
+    luaunit.assertEquals(graph:GetConnections()[1].fromNode, 1)
+    luaunit.assertEquals(graph:GetConnections()[1].toNode, 3)
+
+    local saved = Serialize.Serialize(graph)
+    luaunit.assertEquals(saved, data)
+    luaunit.assertIsNil(saved.nodes[1].name)
+    luaunit.assertIsNil(saved.nodes[2].name)
+end
+
 return TestSerialize

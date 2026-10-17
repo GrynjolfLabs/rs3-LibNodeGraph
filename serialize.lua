@@ -25,6 +25,7 @@ end
 ---@field type string                     # the Node Type key (live Node calls this `typeKey`)
 ---@field controls table<string, any>     # codec-encoded Control values, keyed by pin name
 ---@field mode string|nil                 # instance mode key; omitted when the type has no modes
+---@field name string|nil                 # optional node name; omitted when unset
 
 ---@class LibNodeGraph.SerializedConnection
 ---@field fromNode integer
@@ -49,12 +50,16 @@ function Serialize.Serialize(graph)
     local nodes = {}
     for _, node in pairs(graph.nodes) do
         if node.typeKey == Registry.UNKNOWN_TYPE and node.unknown ~= nil then
-            -- A placeholder round-trips as its ORIGINAL type + raw controls, verbatim: the
-            -- on-disk shape is exactly what was read, so a save with a still-missing type is
-            -- byte-identical to the load (no schema bump, lossless while the type is absent).
+            -- A placeholder round-trips as its ORIGINAL type, raw controls, mode, and name,
+            -- verbatim: the on-disk shape is exactly what was read, so a save with a
+            -- still-missing type is byte-identical to the load (no schema bump, lossless
+            -- while the type is absent). Unset mode and name are omitted.
             local record = { id = node.id, type = node.unknown.type, controls = node.unknown.controls }
             if node.unknown.mode ~= nil then
                 record.mode = node.unknown.mode
+            end
+            if node.unknown.name ~= nil then
+                record.name = node.unknown.name
             end
             nodes[#nodes + 1] = record
         else
@@ -73,6 +78,9 @@ function Serialize.Serialize(graph)
             local record = { id = node.id, type = node.typeKey, controls = controls }
             if nodeType ~= nil and nodeType.modes ~= nil then
                 record.mode = node.mode
+            end
+            if node.name ~= nil then
+                record.name = node.name
             end
             nodes[#nodes + 1] = record
         end
@@ -107,7 +115,7 @@ end
 ---How a Deserialize handles a node whose `type` is not registered:
 ---  `"error"`       — assert (default; the strict, loud-canary contract other consumers rely on).
 ---  `"placeholder"` — preserve it as an inert `__unknown__` node stashing the original type + raw
----                    controls, so it round-trips losslessly and restores once the type returns.
+---                    controls, mode, and name, so it round-trips losslessly and restores once the type returns.
 ---  `"skip"`        — drop the node and every wire touching it.
 ---In `"placeholder"` and `"skip"` mode Deserialize is TOTAL — it never throws: any connection it
 ---can't honor (missing node, missing pin, type mismatch, cycle, duplicate data input) is dropped
@@ -146,13 +154,14 @@ function Serialize.Deserialize(data, registry, opts)
                 graph.nextNodeId = nodeData.id
                 local newId = graph:AddNode(Registry.UNKNOWN_TYPE, {})
                 assert(newId == nodeData.id, "failed to preserve node id during deserialize")
-                -- Stash the original type + raw controls verbatim so Serialize re-emits them
-                -- unchanged (lossless round-trip). The live controls stay empty — the
-                -- placeholder type has no pins.
+                -- Stash the original type + raw controls, mode, and name verbatim so Serialize
+                -- re-emits them unchanged (lossless round-trip). The live controls stay empty —
+                -- the placeholder type has no pins. A missing name is stored as nil and omitted.
                 graph.nodes[newId].unknown = {
                     type = nodeData.type,
                     controls = nodeData.controls or {},
                     mode = nodeData.mode,
+                    name = nodeData.name,
                 }
             else
                 warn("skipping unknown node type '" .. tostring(nodeData.type) .. "' (id " .. tostring(nodeData.id) .. ")")
@@ -185,6 +194,9 @@ function Serialize.Deserialize(data, registry, opts)
             graph.nextNodeId = nodeData.id
             local newId = graph:AddNode(nodeData.type, controls, modeKey)
             assert(newId == nodeData.id, "failed to preserve node id during deserialize")
+            if nodeData.name ~= nil then
+                graph.nodes[newId].name = nodeData.name
+            end
         end
     end
     -- Keep allocating ids above every restored one so a later AddNode can't collide (also
