@@ -53,7 +53,7 @@ function Serialize.Serialize(graph)
             -- A placeholder round-trips as its ORIGINAL type, raw controls, mode, and name,
             -- verbatim: the on-disk shape is exactly what was read, so a save with a
             -- still-missing type is byte-identical to the load (no schema bump, lossless
-            -- while the type is absent). Unset mode and name are omitted.
+            -- while the type is absent).
             local record = { id = node.id, type = node.unknown.type, controls = node.unknown.controls }
             if node.unknown.mode ~= nil then
                 record.mode = node.unknown.mode
@@ -156,7 +156,7 @@ function Serialize.Deserialize(data, registry, opts)
                 assert(newId == nodeData.id, "failed to preserve node id during deserialize")
                 -- Stash the original type + raw controls, mode, and name verbatim so Serialize
                 -- re-emits them unchanged (lossless round-trip). The live controls stay empty —
-                -- the placeholder type has no pins. A missing name is stored as nil and omitted.
+                -- the placeholder type has no pins.
                 graph.nodes[newId].unknown = {
                     type = nodeData.type,
                     controls = nodeData.controls or {},
