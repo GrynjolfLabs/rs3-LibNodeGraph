@@ -307,7 +307,14 @@ function Graph:Connect(fromNode, fromPin, toNode, toPin)
 
     if fromPinDef.kind == "data" then
         local fromTag, toTag = fromPinDef.dataType, toPinDef.dataType
-        if not (fromTag == toTag or fromTag == "any" or toTag == "any") then
+        -- An any output has no known type, so it can only feed an any input.
+        -- An any input still accepts a concrete source: number into any is legal,
+        -- any into number or string is not.
+        if fromTag == "any" then
+            if toTag ~= "any" then
+                return nil, "type_mismatch"
+            end
+        elseif not (fromTag == toTag or toTag == "any") then
             return nil, "type_mismatch"
         end
     end
@@ -363,7 +370,7 @@ end
 -- kind/type match, single-data-input, cycle). Used only by a lenient Deserialize to restore a
 -- wire that touches a `__unknown__` placeholder: the placeholder has no pins, so the validated
 -- Connect path could never accept the wire, yet the wire must survive verbatim to round-trip
--- losslessly once the real type returns. Not for general use — a hand-built graph should always
+-- losslessly once the real type returns. Not for general use. A hand-built graph should always
 -- go through Connect.
 ---@param record { fromNode: integer, fromPin: string, toNode: integer, toPin: string }
 ---@return integer id

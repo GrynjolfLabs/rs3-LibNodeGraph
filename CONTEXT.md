@@ -53,7 +53,8 @@ _Avoid_: Value pin, parameter, argument, field
 
 **Type Tag**:
 An opaque string naming a Data Pin's type (e.g. "bool", "coord"). Two Data Pins may connect
-iff their tags are equal or either is the wildcard "any". The engine never interprets a tag's
+when their tags are equal, or when a concrete output feeds an input tagged "any". An output
+tagged "any" connects only to an input tagged "any". The engine never interprets a tag's
 meaning and never checks runtime values against it — tags govern connect-time legality and UI
 presentation only.
 _Avoid_: Data type, value type, class

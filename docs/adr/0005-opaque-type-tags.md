@@ -1,7 +1,9 @@
 # Data types are opaque string tags, with no coercion or subtyping
 
-Data Pin types are plain string tags the engine never interprets. A Connection is legal iff
-the two tags are equal or either is the wildcard "any". There is deliberately no implicit
+Data Pin types are plain string tags the engine never interprets. A Connection is legal when
+the two tags are equal, or when a concrete output feeds an input tagged "any". An output tagged
+"any" connects only to an input tagged "any": the value's type is not known, so it must not
+enter a pin that expects a number, a string, or any other concrete tag. There is deliberately no implicit
 coercion (e.g. number→string) and no subtyping/hierarchy (e.g. int is-a number), and runtime
 values are never checked against the declared tag — tags govern connect-time legality and UI
 presentation (wire color, editor widget) only.

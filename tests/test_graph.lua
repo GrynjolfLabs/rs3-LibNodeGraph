@@ -240,11 +240,30 @@ function TestGraph:testConnectRejectsDataTypeMismatch()
     luaunit.assertEquals(reason, "type_mismatch")
 end
 
-function TestGraph:testConnectAllowsAnyWildcard()
+function TestGraph:testConnectAllowsConcreteSourceIntoAnyInput()
     local addId = self.graph:AddNode("fixture.add")
     local passId = self.graph:AddNode("fixture.passthrough")
-    -- should not raise: "any" accepts any concrete tag
-    self.graph:Connect(addId, "sum", passId, "in")
+    -- A known number may feed an any input.
+    local id = self.graph:Connect(addId, "sum", passId, "in")
+    luaunit.assertNotNil(id)
+end
+
+function TestGraph:testAnySourceConnectsOnlyToAnyInput()
+    local passId = self.graph:AddNode("fixture.passthrough")
+    local addId = self.graph:AddNode("fixture.add")
+    local coordId = self.graph:AddNode("fixture.coord")
+
+    local intoNumber, numberReason = self.graph:Connect(passId, "out", addId, "a")
+    luaunit.assertNil(intoNumber)
+    luaunit.assertEquals(numberReason, "type_mismatch")
+
+    local intoCoord, coordReason = self.graph:Connect(passId, "out", coordId, "pos")
+    luaunit.assertNil(intoCoord)
+    luaunit.assertEquals(coordReason, "type_mismatch")
+
+    local other = self.graph:AddNode("fixture.passthrough")
+    local intoAny = self.graph:Connect(passId, "out", other, "in")
+    luaunit.assertNotNil(intoAny)
 end
 
 function TestGraph:testConnectRejectsSecondConnectionToSameDataInput()
@@ -724,11 +743,12 @@ function TestGraph:testDeepPureChainExceedsRecursionCap()
         previousId = nextId
     end
 
-    local actionId = self.graph:AddNode("fixture.action")
-    self.graph:Connect(previousId, "out", actionId, "value")
+    -- The chain output is any, so the pull has to land on an any input.
+    local probeId = self.graph:AddNode("fixture.probe")
+    self.graph:Connect(previousId, "out", probeId, "value")
 
     luaunit.assertErrorMsgContains("recursion depth exceeded", function()
-        self.graph:Fire(actionId)
+        self.graph:Fire(probeId)
     end)
 end
 
