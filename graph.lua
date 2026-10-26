@@ -82,11 +82,22 @@ end
 
 ---@param typeKey string                  # a registered Node Type key
 ---@param controls table<string, any>|nil # optional initial Control values, keyed by pin name
----@param mode string|nil                 # optional mode key; missing → defaultMode when the type has modes
+---@param options { name: string|nil, mode: string|nil }|nil # optional name and mode; missing mode → defaultMode when the type has modes
 ---@return integer id                      # the new node's stable id
-function Graph:AddNode(typeKey, controls, mode)
+function Graph:AddNode(typeKey, controls, options)
     local nodeType = self.registry:GetNodeType(typeKey)
     assert(nodeType ~= nil, "unknown node type '" .. tostring(typeKey) .. "'")
+
+    local mode = nil
+    local name = nil
+    if options ~= nil then
+        assert(type(options) == "table", "AddNode options must be a table")
+        mode = options.mode
+        name = options.name
+        if name ~= nil then
+            assert(type(name) == "string", "AddNode name must be a string")
+        end
+    end
 
     local id = self.nextNodeId
     self.nextNodeId = id + 1
@@ -113,7 +124,7 @@ function Graph:AddNode(typeKey, controls, mode)
         end
     end
 
-    self.nodes[id] = {
+    local node = {
         id = id,
         typeKey = typeKey,
         mode = nodeMode,
@@ -124,6 +135,10 @@ function Graph:AddNode(typeKey, controls, mode)
         -- See docs/adr/0010-stateful-node-support.md.
         state = {},
     }
+    if name ~= nil then
+        node.name = name
+    end
+    self.nodes[id] = node
     return id
 end
 

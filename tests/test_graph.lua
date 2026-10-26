@@ -172,6 +172,20 @@ function TestGraph:testAddNodeOverridesDefaultsWithProvidedControls()
     luaunit.assertEquals(self.graph:GetControl(id, "b"), 20)
 end
 
+function TestGraph:testAddNodeStoresOptionalName()
+    local unnamed = self.graph:AddNode("fixture.add")
+    luaunit.assertIsNil(self.graph.nodes[unnamed].name)
+
+    local named = self.graph:AddNode("fixture.add", nil, { name = "Enrage callout" })
+    luaunit.assertEquals(self.graph.nodes[named].name, "Enrage callout")
+end
+
+function TestGraph:testAddNodeRejectsNonTableOptions()
+    luaunit.assertErrorMsgContains("options", function()
+        self.graph:AddNode("fixture.add", nil, "count")
+    end)
+end
+
 function TestGraph:testAddNodeCopiesTableDefaultsPerInstance()
     local id1 = self.graph:AddNode("fixture.coord")
     local id2 = self.graph:AddNode("fixture.coord")

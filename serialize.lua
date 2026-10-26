@@ -192,11 +192,11 @@ function Serialize.Deserialize(data, registry, opts)
             -- Watchdog's Layout (nodeId -> position) — stays valid across a save/load.
             -- AddNode draws the new id from graph.nextNodeId, so pin it to the stored id.
             graph.nextNodeId = nodeData.id
-            local newId = graph:AddNode(nodeData.type, controls, modeKey)
+            local newId = graph:AddNode(nodeData.type, controls, {
+                name = nodeData.name,
+                mode = modeKey,
+            })
             assert(newId == nodeData.id, "failed to preserve node id during deserialize")
-            if nodeData.name ~= nil then
-                graph.nodes[newId].name = nodeData.name
-            end
         end
     end
     -- Keep allocating ids above every restored one so a later AddNode can't collide (also
