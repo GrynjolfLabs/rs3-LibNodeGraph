@@ -52,6 +52,8 @@ local function hasExecPins(pins, pinOrder)
     return false
 end
 
+-- Shallow. Nested tables stay shared with the pin default. Defaults shipped
+-- today are flat values, so a later nested default would need a deep copy.
 local function copyDefault(value)
     if type(value) == "table" then
         local copy = {}
