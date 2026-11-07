@@ -1,0 +1,5 @@
+.claude/worktrees
+.worktrees/
+.scratch/
+node_modules
+LibNodeGraph*.zip
